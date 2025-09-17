@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "+RxRCObkem0=",
+  "dgSpecHash": "k24z7tuOtxk=",
   "success": true,
-  "projectFilePath": "D:\\project\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj",
+  "projectFilePath": "D:\\project\\schema-studio\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\zhangxujun\\.nuget\\packages\\bouncycastle.cryptography\\2.4.0\\bouncycastle.cryptography.2.4.0.nupkg.sha512",
     "C:\\Users\\zhangxujun\\.nuget\\packages\\csvhelper\\30.0.1\\csvhelper.30.0.1.nupkg.sha512",
@@ -13,6 +13,7 @@
     "C:\\Users\\zhangxujun\\.nuget\\packages\\mathnet.numerics.signed\\5.0.0\\mathnet.numerics.signed.5.0.0.nupkg.sha512",
     "C:\\Users\\zhangxujun\\.nuget\\packages\\microsoft.io.recyclablememorystream\\3.0.1\\microsoft.io.recyclablememorystream.3.0.1.nupkg.sha512",
     "C:\\Users\\zhangxujun\\.nuget\\packages\\microsoft.netcore.platforms\\5.0.0\\microsoft.netcore.platforms.5.0.0.nupkg.sha512",
+    "C:\\Users\\zhangxujun\\.nuget\\packages\\newtonsoft.json\\13.0.4\\newtonsoft.json.13.0.4.nupkg.sha512",
     "C:\\Users\\zhangxujun\\.nuget\\packages\\npoi\\2.7.4\\npoi.2.7.4.nupkg.sha512",
     "C:\\Users\\zhangxujun\\.nuget\\packages\\sharpziplib\\1.4.2\\sharpziplib.1.4.2.nupkg.sha512",
     "C:\\Users\\zhangxujun\\.nuget\\packages\\sixlabors.fonts\\1.0.1\\sixlabors.fonts.1.0.1.nupkg.sha512",

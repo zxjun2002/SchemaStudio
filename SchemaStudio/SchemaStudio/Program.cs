@@ -1,11 +1,18 @@
+// Program.cs — SchemaStudio（Newtonsoft.Json + NPOI，多 Sheet，懒加载 Sheet 树）
 using System.ComponentModel;
 using System.Data;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using CsvHelper;
 using System.Globalization;
+using System.Text;
+using System.Linq;
+using System.Collections.Generic;
+using System.Windows.Forms;
+using CsvHelper;
 using ExcelDataReader;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
+using NPOI.SS.UserModel;     // 接口类型
+using NPOI.HSSF.UserModel;   // .xls
+using NPOI.XSSF.UserModel;   // .xlsx
 
 namespace SchemaStudio
 {
@@ -14,7 +21,7 @@ namespace SchemaStudio
         [STAThread]
         static void Main()
         {
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance); // ExcelDataReader 需要
             ApplicationConfiguration.Initialize();
             Application.Run(new MainForm());
         }
@@ -29,58 +36,88 @@ namespace SchemaStudio
         private readonly TreeView tree;
         private readonly DataGridView grid;
         private readonly BindingList<ColumnRow> rows = new();
-        private readonly ToolTip tips = new ToolTip();
+        private readonly ToolTip tips = new();
 
         private string? currentDir;
-        private string? currentFilePath;
-        private TableSchema? currentSchema;
+        private NodeTag? currentTag;               // 兼容文件/Sheet 两级
+        private TableSchema? currentSchema;        // 当前编辑的「单表/Sheet」结构
+        private WorkbookSchema? currentWorkbook;   // 当前 Excel 文件对应的工作簿 JSON（保存时写回）
         private PropertyRegistry registry = new();
 
-        private static readonly string[] FileExts = new[] { ".csv", ".xlsx" };
+        private static readonly string[] FileExts = new[] { ".csv", ".xlsx", ".xls" };
         private static readonly string[] AllowedTypes = new[]
         {
             "int","long","float","double","bool","string","int[]","List<int>"
         };
 
         private string RegistryPath => currentDir == null ? "" : Path.Combine(currentDir!, "schema.registry.json");
-        private string UiStatePath   => currentDir == null ? "" : Path.Combine(currentDir!, "schema.ui.json");
+        private string UiStatePath  => currentDir == null ? "" : Path.Combine(currentDir!, "schema.ui.json");
 
         public MainForm()
         {
             Text = "SchemaStudio — JSON 可视化编辑器";
             Width = 1280; Height = 760;
 
-            split = new SplitContainer { Dock = DockStyle.Fill, SplitterDistance = 380 };
-            topBar = new Panel { Dock = DockStyle.Top, Height = 40 };
-            btnOpenDir = new Button { Text = "打开目录", Left = 10, Width = 90, Top = 8 };
-            btnSave    = new Button { Text = "保存JSON", Left = 110, Width = 90, Top = 8 };
-            btnCheck   = new Button { Text = "检查",     Left = 210, Width = 70, Top = 8 };
-            btnNewTable= new Button { Text = "新建表",   Left = 290, Width = 80, Top = 8 };
-            btnPropLib = new Button { Text = "自定义属性", Left = 380, Width = 110, Top = 8 };
-            lblDir = new Label { Text = "未选择目录", AutoSize = true, Left = 510, Top = 12 };
+            // 更稳的缩放模式（高分屏不容易出错）
+            AutoScaleMode = AutoScaleMode.Dpi;
 
+            // ====== 顶部栏控件 ======
+            btnOpenDir = new Button { Text = "打开目录",   Left = 10,  Width = 90, Top = 8 };
+            btnSave    = new Button { Text = "保存JSON",   Left = 110, Width = 90, Top = 8 };
+            btnCheck   = new Button { Text = "检查",       Left = 210, Width = 70, Top = 8 };
+            btnNewTable= new Button { Text = "新建表",     Left = 290, Width = 80, Top = 8 };
+            btnPropLib = new Button { Text = "自定义属性", Left = 380, Width = 110, Top = 8 };
+            lblDir     = new Label  { Text = "未选择目录", AutoSize = true, Left = 510, Top = 12 };
+
+            // 事件
             btnOpenDir.Click += (_, __) => ChooseDir();
             btnSave.Click    += (_, __) => SaveSchema();
             btnCheck.Click   += (_, __) => ValidateCurrent();
             btnNewTable.Click+= (_, __) => CreateNewTable();
             btnPropLib.Click += (_, __) => OpenPropertyLibrary();
 
-            tips.SetToolTip(btnCheck, "校验当前表数据与配置的数值类型是否匹配");
-            tips.SetToolTip(btnNewTable, "在选定目录下创建CSV并生成同名 .schema.json");
+            tips.SetToolTip(btnCheck,   "校验当前表数据与配置的数值类型是否匹配");
+            tips.SetToolTip(btnNewTable,"新建 CSV / XLSX / XLS（Excel 可创建多个工作表）");
             tips.SetToolTip(btnPropLib, "编辑列自定义属性库(根目录 schema.registry.json，团队共享)");
 
+            // 顶部栏：使用 AutoSize，避免被裁切
+            topBar = new Panel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Padding = new Padding(8, 6, 8, 6)
+            };
             topBar.Controls.AddRange(new Control[] { btnOpenDir, btnSave, btnCheck, btnNewTable, btnPropLib, lblDir });
-            Controls.Add(split);
-            Controls.Add(topBar);
 
-            // 左：目录树（递归）
+            // ====== 中间分栏 ======
+            split = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                SplitterDistance = 380
+            };
+
+            // 左树（懒加载 Excel Sheets）
             tree = new TreeView { Dock = DockStyle.Fill, HideSelection = false, ShowLines = true };
-            tree.AfterSelect += (_, e) => TryLoadNodeFile(e.Node);
-            tree.NodeMouseDoubleClick += (_, e) => TryLoadNodeFile(e.Node);
+            tree.BeforeExpand += (_, e) =>
+            {
+                if (e.Node?.Tag is NodeTag t && t.IsExcelFile && e.Node.Nodes.Count == 1 && e.Node.Nodes[0].Tag == null)
+                    AddSheetChildren(e.Node, t.Path);
+            };
+            tree.AfterSelect += (_, e) => TryLoadNode(e.Node);
+            tree.NodeMouseDoubleClick += (_, e) => TryLoadNode(e.Node);
             split.Panel1.Controls.Add(tree);
 
-            // 右：Grid
-            grid = new DataGridView { Dock = DockStyle.Fill, AutoGenerateColumns = false, AllowUserToAddRows = false, RowHeadersVisible = false };
+            // 右表格
+            grid = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                AutoGenerateColumns = false,
+                AllowUserToAddRows = false,
+                RowHeadersVisible = false,
+                // 让表头高度自适应，避免顶部看起来像被“吃掉”
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize
+            };
             BuildGridColumns();
             grid.DataSource = rows;
             grid.CellContentClick += Grid_CellContentClick;
@@ -88,121 +125,35 @@ namespace SchemaStudio
             split.SplitterMoved += (_, __) => SaveUiState();
             split.Panel2.Controls.Add(grid);
 
+            // ====== 根布局：TableLayoutPanel 两行 ======
+            var root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2
+            };
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));           // 第1行：topBar 自适应
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));      // 第2行：split 占满
+            root.Controls.Add(topBar, 0, 0);
+            root.Controls.Add(split, 0, 1);
+
+            // 把根布局加到窗体（不要直接把 topBar/split 加到窗体）
+            Controls.Add(root);
+
             this.FormClosing += (_, __) => SaveUiState();
         }
 
         private void BuildGridColumns()
         {
             grid.Columns.Clear();
-
-            var colName = new DataGridViewTextBoxColumn
-            {
-                Name = "col_name",
-                HeaderText = "列名",
-                DataPropertyName = nameof(ColumnRow.ColName),
-                ReadOnly = true,
-                Width = 260
-            };
-            grid.Columns.Add(colName);
-
-            var typeCol = new DataGridViewComboBoxColumn
-            {
-                Name = "value_type",
-                HeaderText = "数值类型",
-                DataPropertyName = nameof(ColumnRow.ValueType),
-                Width = 140,
-                DataSource = AllowedTypes
-            };
-            grid.Columns.Add(typeCol);
-
-            var pkCol = new DataGridViewTextBoxColumn
-            {
-                Name = "pk_order",
-                HeaderText = "主键序列",
-                DataPropertyName = nameof(ColumnRow.PkOrderText),
-                Width = 150
-            };
-            grid.Columns.Add(pkCol);
-
-            var btn = new DataGridViewButtonColumn
-            {
-                Name = "prop_btn",
-                HeaderText = "列属性",
-                Text = "属性…",
-                UseColumnTextForButtonValue = true,
-                Width = 80
-            };
-            grid.Columns.Add(btn);
-
-            var summary = new DataGridViewTextBoxColumn
-            {
-                Name = "prop_summary",
-                HeaderText = "属性摘要",
-                DataPropertyName = nameof(ColumnRow.PropsSummary),
-                ReadOnly = true,
-                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
-            };
-            grid.Columns.Add(summary);
+            grid.Columns.Add(new DataGridViewTextBoxColumn { Name="col_name", HeaderText="列名", DataPropertyName=nameof(ColumnRow.ColName), ReadOnly=true, Width=260 });
+            grid.Columns.Add(new DataGridViewComboBoxColumn { Name="value_type", HeaderText="数值类型", DataPropertyName=nameof(ColumnRow.ValueType), Width=140, DataSource=AllowedTypes });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { Name="pk_order", HeaderText="主键序列", DataPropertyName=nameof(ColumnRow.PkOrderText), Width=150 });
+            grid.Columns.Add(new DataGridViewButtonColumn { Name="prop_btn", HeaderText="列属性", Text="属性…", UseColumnTextForButtonValue=true, Width=80 });
+            grid.Columns.Add(new DataGridViewTextBoxColumn { Name="prop_summary", HeaderText="属性摘要", DataPropertyName=nameof(ColumnRow.PropsSummary), ReadOnly=true, AutoSizeMode=DataGridViewAutoSizeColumnMode.Fill });
         }
 
-        private void ApplyUiState()
-        {
-            if (string.IsNullOrEmpty(UiStatePath) || !File.Exists(UiStatePath)) return;
-            try
-            {
-                var state = JsonSerializer.Deserialize<UiState>(File.ReadAllText(UiStatePath));
-                if (state == null) return;
-                if (state.SplitterDistance > 0) split.SplitterDistance = state.SplitterDistance;
-                foreach (DataGridViewColumn c in grid.Columns)
-                {
-                    if (state.ColWidths.TryGetValue(c.Name, out var w) && w > 0)
-                        c.Width = w;
-                }
-            }
-            catch { /* ignore */ }
-        }
-
-        private void SaveUiState()
-        {
-            if (string.IsNullOrEmpty(UiStatePath)) return;
-            try
-            {
-                var st = new UiState { SplitterDistance = split.SplitterDistance, ColWidths = new Dictionary<string, int>() };
-                foreach (DataGridViewColumn c in grid.Columns)
-                {
-                    st.ColWidths[c.Name] = c.Width;
-                }
-                File.WriteAllText(UiStatePath, JsonSerializer.Serialize(st, new JsonSerializerOptions { WriteIndented = true }));
-            }
-            catch { /* ignore */ }
-        }
-
-        private void Grid_CellContentClick(object? sender, DataGridViewCellEventArgs e)
-        {
-            if (e.RowIndex < 0) return;
-            var btnColIndex = grid.Columns["prop_btn"]!.Index;
-            if (e.ColumnIndex == btnColIndex && grid.Rows[e.RowIndex].DataBoundItem is ColumnRow row)
-            {
-                if (currentSchema == null) return;
-                var col = currentSchema.Columns!.First(c => c.ColName == row.ColName);
-                var defs = registry.Properties.Where(d => d.Scope == "column" || d.Scope == "both").ToList();
-
-                using var dlg = new AssignPropertyForm(defs, col.ColProperties ?? new List<PropertyKV>());
-                if (dlg.ShowDialog(this) == DialogResult.OK)
-                {
-                    col.ColProperties = dlg.Result;
-                    row.PropsSummary = Summarize(col.ColProperties);
-                    grid.InvalidateRow(e.RowIndex);
-                }
-            }
-        }
-
-        private string Summarize(List<PropertyKV>? list)
-        {
-            if (list == null || list.Count == 0) return "";
-            return string.Join("; ", list.Select(p => $"{p.PropertyName}={p.PropertyValue}"));
-        }
-
+        // ======= 顶部动作 =======
         private void ChooseDir()
         {
             using var fbd = new FolderBrowserDialog();
@@ -212,7 +163,7 @@ namespace SchemaStudio
                 lblDir.Text = currentDir;
                 LoadRegistry();
                 BuildDirectoryTree();
-                ApplyUiState(); // 应用用户上次的列宽/分割条比例
+                ApplyUiState();
             }
         }
 
@@ -221,14 +172,11 @@ namespace SchemaStudio
             try
             {
                 registry = File.Exists(RegistryPath)
-                    ? JsonSerializer.Deserialize<PropertyRegistry>(File.ReadAllText(RegistryPath), JsonOpt()) ?? new PropertyRegistry()
+                    ? JsonConvert.DeserializeObject<PropertyRegistry>(File.ReadAllText(RegistryPath)) ?? new PropertyRegistry()
                     : new PropertyRegistry();
 
-                EnsureProp("cs_type", "终端类型", scope: "column", kind: "enum",
-                    values: new[] { "ALL", "C", "S" }, defVal: "ALL");
-                EnsureProp("translate_mode", "翻译类型", scope: "column", kind: "enum",
-                    values: new[] { "none", "auto", "manual" }, defVal: "none");
-
+                EnsureProp("cs_type", "终端类型", scope: "column", kind: "enum", values: new[] { "ALL","C","S" }, defVal: "ALL");
+                EnsureProp("translate_mode", "翻译类型", scope: "column", kind: "enum", values: new[] { "none","auto","manual" }, defVal: "none");
                 SaveRegistry();
             }
             catch (Exception ex)
@@ -237,31 +185,19 @@ namespace SchemaStudio
                 registry = new PropertyRegistry();
             }
         }
-
         private void EnsureProp(string key, string title, string scope, string kind, IEnumerable<string> values, string defVal)
         {
             if (!registry.Properties.Any(p => p.Key.Equals(key, StringComparison.OrdinalIgnoreCase)))
             {
-                registry.Properties.Add(new PropertyDef
-                {
-                    Key = key, Title = title, Scope = scope, Kind = kind,
-                    EnumValues = values.ToList(), Default = defVal
-                });
+                registry.Properties.Add(new PropertyDef { Key = key, Title = title, Scope = scope, Kind = kind, EnumValues = values.ToList(), Default = defVal });
             }
         }
-
         private void SaveRegistry()
         {
-            try
-            {
-                if (string.IsNullOrEmpty(RegistryPath)) return;
-                var json = JsonSerializer.Serialize(registry, JsonOpt(true));
-                File.WriteAllText(RegistryPath, json, new UTF8Encoding(false));
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"保存属性库失败：{ex.Message}");
-            }
+            if (string.IsNullOrEmpty(RegistryPath)) return;
+            var json = JsonConvert.SerializeObject(registry, Formatting.Indented,
+                new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+            File.WriteAllText(RegistryPath, json, new UTF8Encoding(false));
         }
 
         private void OpenPropertyLibrary()
@@ -275,6 +211,7 @@ namespace SchemaStudio
             }
         }
 
+        // ======= 目录树（懒加载 Sheets）=======
         private void BuildDirectoryTree()
         {
             tree.BeginUpdate();
@@ -283,7 +220,7 @@ namespace SchemaStudio
                 tree.Nodes.Clear();
                 if (currentDir == null || !Directory.Exists(currentDir)) return;
 
-                var root = new TreeNode(Path.GetFileName(currentDir.TrimEnd(Path.DirectorySeparatorChar))) { Tag = currentDir };
+                var root = new TreeNode(Path.GetFileName(currentDir.TrimEnd(Path.DirectorySeparatorChar))) { Tag = new NodeTag(currentDir, null) };
                 tree.Nodes.Add(root);
                 AddDirNodes(root, currentDir);
                 root.Expand();
@@ -295,7 +232,7 @@ namespace SchemaStudio
         {
             foreach (var sub in Directory.GetDirectories(dir).OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
             {
-                var node = new TreeNode(Path.GetFileName(sub)) { Tag = sub };
+                var node = new TreeNode(Path.GetFileName(sub)) { Tag = new NodeTag(sub, null) };
                 parent.Nodes.Add(node);
                 AddDirNodes(node, sub);
             }
@@ -304,98 +241,164 @@ namespace SchemaStudio
                          .Where(p => !Path.GetFileName(p).StartsWith("~$"))
                          .OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
             {
-                var node = new TreeNode(Path.GetFileName(file)) { Tag = file };
+                var ext = Path.GetExtension(file).ToLowerInvariant();
+                var node = new TreeNode(Path.GetFileName(file)) { Tag = new NodeTag(file, null) };
                 parent.Nodes.Add(node);
+                if (ext is ".xlsx" or ".xls")
+                    node.Nodes.Add(new TreeNode("(展开查看工作表)")); // 懒加载
             }
         }
 
-        private void TryLoadNodeFile(TreeNode? node)
+        private void AddSheetChildren(TreeNode fileNode, string excelPath)
         {
-            if (node?.Tag is string path)
+            fileNode.Nodes.Clear();
+            try
             {
-                var ext = Path.GetExtension(path).ToLowerInvariant();
-                if (ext == ".csv" || ext == ".xlsx") LoadFile(path);
+                using var fs = File.OpenRead(excelPath);
+                using var r = ExcelReaderFactory.CreateReader(fs);
+                var ds = r.AsDataSet();
+                foreach (DataTable t in ds.Tables)
+                    fileNode.Nodes.Add(new TreeNode(t.TableName) { Tag = new NodeTag(excelPath, t.TableName) });
+            }
+            catch (Exception ex)
+            {
+                fileNode.Nodes.Add(new TreeNode($"(读取失败: {ex.Message})"));
             }
         }
 
-        private void LoadFile(string path)
+        private void TryLoadNode(TreeNode? node)
         {
-            currentFilePath = path;
-            var tableName = Path.GetFileName(path);
-            var jsonPath = GetSchemaJsonPath(path);
+            if (node?.Tag is not NodeTag tag) return;
+            currentTag = tag;
+            currentSchema = null;
+            currentWorkbook = null;
 
-            var colNames = ReadHeaderColumns(path);
+            if (tag.IsExcelFile)
+            {
+                rows.Clear(); // 文件层不显示数据；展开看 Sheet
+                Text = $"SchemaStudio — {Path.GetFileName(tag.Path)}";
+                return;
+            }
+
+            if (tag.IsExcelSheet) LoadExcelSheet(tag.Path, tag.Sheet!);
+            else if (tag.IsCsv)   LoadCsv(tag.Path);
+        }
+
+        // ======= 加载 CSV / Excel+sheet =======
+        private void LoadCsv(string path)
+        {
+            var tableName = Path.GetFileName(path);
+            var jsonPath  = GetSchemaJsonPath(path);
+
+            var colNames = ReadCsvHeader(path);
             if (colNames.Count == 0) { MessageBox.Show("未能读取到列名。请确认第1行是字段名。"); return; }
 
-            TableSchema schema = File.Exists(jsonPath)
-                ? (JsonSerializer.Deserialize<TableSchema>(File.ReadAllText(jsonPath), JsonOpt()) ?? new TableSchema { TableName = tableName })
+            var schema = File.Exists(jsonPath)
+                ? JsonConvert.DeserializeObject<TableSchema>(File.ReadAllText(jsonPath)) ?? new TableSchema { TableName = tableName }
                 : new TableSchema { TableName = tableName };
-            schema.TableName ??= tableName;
-
-            var map = schema.Columns?.ToDictionary(c => c.ColName ?? "", StringComparer.OrdinalIgnoreCase) ?? new();
-            var newCols = new List<ColumnSchema>();
-            for (int i = 0; i < colNames.Count; i++)
-            {
-                var name = colNames[i];
-                if (map.TryGetValue(name, out var c))
-                {
-                    c.ColSort = i;
-                    newCols.Add(c);
-                }
-                else
-                {
-                    newCols.Add(new ColumnSchema
-                    {
-                        ColName = name,
-                        ValueType = "string",
-                        PkOrder = -1,
-                        PrimaryKey = false,
-                        ColSort = i,
-                        ColProperties = new List<PropertyKV>()
-                    });
-                }
-            }
-            schema.Columns = newCols;
-            currentSchema = schema;
-
-            rows.Clear();
-            foreach (var c in schema.Columns)
-            {
-                rows.Add(ColumnRow.FromSchema(c));
-            }
+            var cols = MapColumns(colNames, schema.Columns);
+            currentSchema = new TableSchema { TableName = tableName, Columns = cols };
+            rows.Clear(); foreach (var c in cols) rows.Add(ColumnRow.FromSchema(c));
             Text = $"SchemaStudio — {tableName}";
         }
 
+        private void LoadExcelSheet(string path, string sheetName)
+        {
+            var tableName = $"{Path.GetFileName(path)}::{sheetName}";
+            var jsonPath  = GetSchemaJsonPath(path);
+
+            var colNames = ReadXlsxHeader(path, sheetName);
+            if (colNames.Count == 0) { MessageBox.Show("未能读取到列名。请确认第1行是字段名。"); return; }
+
+            currentWorkbook = File.Exists(jsonPath)
+                ? JsonConvert.DeserializeObject<WorkbookSchema>(File.ReadAllText(jsonPath))
+                : null;
+
+            // 兼容历史：若是单表 JSON 也能读
+            if (currentWorkbook == null && File.Exists(jsonPath))
+            {
+                var legacy = JsonConvert.DeserializeObject<TableSchema>(File.ReadAllText(jsonPath));
+                if (legacy?.Columns != null)
+                {
+                    currentWorkbook = new WorkbookSchema
+                    {
+                        WorkbookName = Path.GetFileName(path),
+                        Sheets = new List<SheetSchema> { new SheetSchema { SheetName = sheetName, Columns = legacy.Columns } }
+                    };
+                }
+            }
+            currentWorkbook ??= new WorkbookSchema { WorkbookName = Path.GetFileName(path), Sheets = new List<SheetSchema>() };
+
+            var entry = currentWorkbook.Sheets.FirstOrDefault(s => s.SheetName.Equals(sheetName, StringComparison.OrdinalIgnoreCase));
+            var cols  = MapColumns(colNames, entry?.Columns);
+            currentSchema = new TableSchema { TableName = tableName, Columns = cols };
+            rows.Clear(); foreach (var c in cols) rows.Add(ColumnRow.FromSchema(c));
+            Text = $"SchemaStudio — {tableName}";
+        }
+
+        private List<ColumnSchema> MapColumns(List<string> colNames, List<ColumnSchema>? existing)
+        {
+            var map = existing?.ToDictionary(c => c.ColName ?? "", StringComparer.OrdinalIgnoreCase) ?? new();
+            var list = new List<ColumnSchema>();
+            for (int i = 0; i < colNames.Count; i++)
+            {
+                var n = colNames[i];
+                if (map.TryGetValue(n, out var c)) { c.ColSort = i; list.Add(c); }
+                else list.Add(new ColumnSchema { ColName = n, ValueType = "string", PkOrder = -1, PrimaryKey = false, ColSort = i, ColProperties = new() });
+            }
+            return list;
+        }
+
+        // ======= 保存 =======
         private void SaveSchema()
         {
-            if (currentSchema == null || currentFilePath == null) return;
+            if (currentTag == null || currentSchema == null) return;
 
+            // 同步 UI -> 模型
             foreach (var r in rows)
             {
                 var c = currentSchema.Columns!.First(x => x.ColName == r.ColName);
                 c.ValueType = r.ValueType;
-                c.PkOrder = r.PkOrder; // 已由 PkOrderText 同步
+                c.PkOrder   = r.PkOrder;
                 c.PrimaryKey = r.PkOrder >= 0;
             }
 
-            var jsonPath = GetSchemaJsonPath(currentFilePath);
-            var json = JsonSerializer.Serialize(currentSchema, JsonOpt(true));
-            File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
-            MessageBox.Show($"已保存：{jsonPath}", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
+            var jsonPath = GetSchemaJsonPath(currentTag.Path);
 
-        // —— 校验 —— //
-        private void ValidateCurrent()
-        {
-            if (currentFilePath == null || currentSchema == null)
+            if (currentTag.IsCsv)
             {
-                MessageBox.Show("请先在左侧选择一张表。");
+                var json = JsonConvert.SerializeObject(currentSchema, Formatting.Indented,
+                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
+            }
+            else if (currentTag.IsExcelSheet)
+            {
+                currentWorkbook ??= new WorkbookSchema { WorkbookName = Path.GetFileName(currentTag.Path), Sheets = new() };
+                var entry = currentWorkbook.Sheets.FirstOrDefault(s => s.SheetName.Equals(currentTag.Sheet!, StringComparison.OrdinalIgnoreCase));
+                if (entry == null) { entry = new SheetSchema { SheetName = currentTag.Sheet!, Columns = new() }; currentWorkbook.Sheets.Add(entry); }
+                entry.Columns = currentSchema.Columns!;
+                var json = JsonConvert.SerializeObject(currentWorkbook, Formatting.Indented,
+                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
+            }
+            else if (currentTag.IsExcelFile)
+            {
+                MessageBox.Show("请选择具体工作表后再保存。");
                 return;
             }
 
-            var headers = ReadHeaderColumns(currentFilePath);
+            MessageBox.Show($"已保存：{jsonPath}", "完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ======= 校验 =======
+        private void ValidateCurrent()
+        {
+            if (currentTag == null || currentSchema == null)
+            { MessageBox.Show("请先选择 CSV 或 Excel 的某个工作表。"); return; }
+
+            var headers = currentTag.IsExcelSheet ? ReadXlsxHeader(currentTag.Path, currentTag.Sheet!) : ReadCsvHeader(currentTag.Path);
             if (headers.Count == 0) { MessageBox.Show("未能读取到列名。"); return; }
-            var data = ReadAllRows(currentFilePath, headers.Count);
+            var data = currentTag.IsExcelSheet ? ReadXlsxRows(currentTag.Path, currentTag.Sheet!, headers.Count) : ReadCsvRows(currentTag.Path, headers.Count);
 
             var headerIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < headers.Count; i++) headerIndex[headers[i]] = i;
@@ -406,35 +409,26 @@ namespace SchemaStudio
                 var row = data[rowIdx];
                 foreach (var col in currentSchema.Columns!)
                 {
-                    var name = col.ColName ?? "";
-                    if (!headerIndex.TryGetValue(name, out var colIdx)) continue;
-                    var val = colIdx < row.Length ? row[colIdx] ?? "" : "";
+                    if (!headerIndex.TryGetValue(col.ColName ?? "", out var ci)) continue;
+                    var val = ci < row.Length ? row[ci] ?? "" : "";
                     if (!IsValid(val, col.ValueType ?? "string", out var reason))
                     {
                         errors.Add(new ValidationError
                         {
-                            Row = rowIdx + 2,
-                            Column = name,
-                            Value = val,
-                            Expected = col.ValueType ?? "string",
-                            Message = reason
+                            Row = rowIdx + 2, Column = col.ColName ?? "", Value = val,
+                            Expected = col.ValueType ?? "string", Message = reason
                         });
                     }
                 }
             }
-
-            using var dlg = new ValidationResultForm(Path.GetFileName(currentFilePath), errors);
+            using var dlg = new ValidationResultForm(currentSchema.TableName ?? "", errors);
             dlg.ShowDialog(this);
         }
 
         private static bool IsValid(string value, string type, out string reason)
         {
-            reason = "";
-            if (string.IsNullOrWhiteSpace(value)) return true;
-
-            var t = (type ?? "string").Trim();
-            NumberStyles ns = NumberStyles.Integer;
-            var ic = CultureInfo.InvariantCulture;
+            reason = ""; if (string.IsNullOrWhiteSpace(value)) return true;
+            var t = (type ?? "string").Trim(); var ic = CultureInfo.InvariantCulture;
 
             bool ParseBool(string s)
             {
@@ -443,38 +437,162 @@ namespace SchemaStudio
                 return s is "1" or "0" or "y" or "n" or "yes" or "no" or "是" or "否" or "真" or "假";
             }
 
-            bool ParseIntSeq(string s)
-            {
-                var parts = s.Split(new[] { ',', '，', ';', '|', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var p in parts)
-                    if (!int.TryParse(p.Trim(), ns, ic, out _)) return false;
-                return true;
-            }
-
             switch (t)
             {
-                case "int":    if (!int.TryParse(value, ns, ic, out _)) { reason = "不是有效的 int"; return false; } return true;
-                case "long":   if (!long.TryParse(value, ns, ic, out _)) { reason = "不是有效的 long"; return false; } return true;
-                case "float":  if (!float.TryParse(value, NumberStyles.Float, ic, out _)) { reason = "不是有效的 float"; return false; } return true;
-                case "double": if (!double.TryParse(value, NumberStyles.Float, ic, out _)) { reason = "不是有效的 double"; return false; } return true;
+                case "int":    if (!int.TryParse(value, NumberStyles.Integer, ic, out _))   { reason = "不是有效的 int"; return false; } return true;
+                case "long":   if (!long.TryParse(value, NumberStyles.Integer, ic, out _))  { reason = "不是有效的 long"; return false; } return true;
+                case "float":  if (!float.TryParse(value, NumberStyles.Float, ic, out _))   { reason = "不是有效的 float"; return false; } return true;
+                case "double": if (!double.TryParse(value, NumberStyles.Float, ic, out _))  { reason = "不是有效的 double"; return false; } return true;
                 case "bool":   if (!ParseBool(value)) { reason = "不是有效的 bool(true/false/1/0/是/否)"; return false; } return true;
                 case "string": return true;
                 case "int[]":
                 case "List<int>":
-                    if (!ParseIntSeq(value)) { reason = "不是有效的整型数组(分隔符支持 , ; | 空格)"; return false; }
-                    return true;
+                    return TryParseIntArray(value, out _, out reason);
                 default:       return true;
             }
         }
-
-        private static List<string[]> ReadAllRows(string path, int expectedCols)
+        private static bool TryParseIntArray(string s, out int[] result, out string reason)
         {
-            var ext = Path.GetExtension(path).ToLowerInvariant();
-            if (ext == ".csv") return ReadCsvRows(path, expectedCols);
-            if (ext == ".xlsx") return ReadXlsxRows(path, expectedCols);
-            return new();
+            result = Array.Empty<int>(); reason = ""; if (string.IsNullOrWhiteSpace(s)) return true; s = s.Trim();
+            if (s.StartsWith("[") && s.EndsWith("]"))
+            {
+                try { result = (JsonConvert.DeserializeObject<List<int>>(s) ?? new()).ToArray(); return true; }
+                catch { reason = "不是有效的 JSON 数组（示例：[1,2,3]）"; return false; }
+            }
+            var parts = s.Split(new[] { ',', '，', ';', '|', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var list = new List<int>();
+            foreach (var p in parts) { if (!int.TryParse(p.Trim(), out var v)) { reason = "不是有效的整型数组（建议使用 [1,2,3]）"; return false; } list.Add(v); }
+            result = list.ToArray(); return true;
         }
 
+        // ======= 新建表（支持多 Sheet；NPOI 写入）=======
+        private void CreateNewTable()
+        {
+            if (currentDir == null) { MessageBox.Show("请先打开根目录"); return; }
+            var dirs = GetAllDirs(currentDir).ToList();
+            using var dlg = new NewTableForm(currentDir, dirs, registry, AllowedTypes);
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+            var destDir    = dlg.ResultDir!;
+            var fileBase   = dlg.ResultFileName!;
+            var fmt        = dlg.ResultFormat;               // csv/xlsx/xls
+            var sheetNames = dlg.ResultSheets;               // 仅 Excel
+
+            string path = Path.Combine(destDir, fileBase + (fmt == "xlsx" ? ".xlsx" : fmt == "xls" ? ".xls" : ".csv"));
+            if (File.Exists(path)) { MessageBox.Show("同名文件已存在，已取消。"); return; }
+            Directory.CreateDirectory(destDir);
+
+            var headers = dlg.Columns.Select(c => c.ColName).ToArray();
+            bool wrote = false; string warn = "";
+
+            try
+            {
+                if (fmt == "xlsx") wrote = TryWriteXlsxMulti(path, sheetNames, headers, out warn);
+                else if (fmt == "xls") wrote = TryWriteXlsMulti(path, sheetNames, headers, out warn);
+            }
+            catch (Exception ex) { warn = $"写入 Excel 失败：{ex.Message}"; wrote = false; }
+
+            if (!wrote) // 回退 CSV
+            {
+                path = Path.Combine(destDir, fileBase + ".csv");
+                WriteCsvHeader(path, headers);
+                if (!string.IsNullOrEmpty(warn)) MessageBox.Show(warn + "\n已回退为 CSV。");
+            }
+
+            // 生成 schema JSON
+            var jsonPath = GetSchemaJsonPath(path);
+            if (fmt == "csv" || !wrote)
+            {
+                var schema = new TableSchema
+                {
+                    TableName = Path.GetFileName(path),
+                    Columns = dlg.Columns.Select((c, idx) => new ColumnSchema
+                    {
+                        ColName = c.ColName, ValueType = c.ValueType, PkOrder = c.PkOrder,
+                        PrimaryKey = c.PkOrder >= 0, ColSort = idx, ColProperties = c.ColProperties?.ToList() ?? new()
+                    }).ToList()
+                };
+                var json = JsonConvert.SerializeObject(schema, Formatting.Indented,
+                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
+            }
+            else
+            {
+                var wb = new WorkbookSchema
+                {
+                    WorkbookName = Path.GetFileName(path),
+                    Sheets = sheetNames.Select(sn => new SheetSchema
+                    {
+                        SheetName = sn,
+                        Columns = dlg.Columns.Select((c, idx) => new ColumnSchema
+                        {
+                            ColName = c.ColName, ValueType = c.ValueType, PkOrder = c.PkOrder,
+                            PrimaryKey = c.PkOrder >= 0, ColSort = idx, ColProperties = c.ColProperties?.ToList() ?? new()
+                        }).ToList()
+                    }).ToList()
+                };
+                var json = JsonConvert.SerializeObject(wb, Formatting.Indented,
+                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
+            }
+
+            BuildDirectoryTree();
+
+            // 定位：CSV 直接选中；Excel 选中文件节点（展开可见所有 Sheet）
+            SelectPathInTree(path);
+            MessageBox.Show($"已创建：\n{path}\n{path}.schema.json");
+        }
+
+        // —— NPOI 写 Excel 首行（多 Sheet）——
+        private static bool TryWriteXlsxMulti(string path, IEnumerable<string> sheets, IEnumerable<string> headers, out string warn)
+        {
+            warn = "";
+            using var wb = new XSSFWorkbook();
+            foreach (var sn in sheets)
+            {
+                var ws = wb.CreateSheet(sn);
+                var r0 = ws.CreateRow(0);
+                int c = 0; foreach (var h in headers) r0.CreateCell(c++).SetCellValue(h);
+            }
+            using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+            wb.Write(fs);
+            return true;
+        }
+        private static bool TryWriteXlsMulti(string path, IEnumerable<string> sheets, IEnumerable<string> headers, out string warn)
+        {
+            warn = "";
+            using var wb = new HSSFWorkbook();
+            foreach (var sn in sheets)
+            {
+                var ws = wb.CreateSheet(sn);
+                var r0 = ws.CreateRow(0);
+                int c = 0; foreach (var h in headers) r0.CreateCell(c++).SetCellValue(h);
+            }
+            using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+            wb.Write(fs);
+            return true;
+        }
+
+        // —— 写 CSV 首行 —— 
+        private static void WriteCsvHeader(string path, IEnumerable<string> headers)
+        {
+            using var sw = new StreamWriter(path, false, new UTF8Encoding(true));
+            static string Esc(string s) =>
+                (s.Contains('"') || s.Contains(',') || s.Contains('\n') || s.Contains('\r'))
+                    ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+            sw.WriteLine(string.Join(",", headers.Select(Esc)));
+        }
+
+        // —— 读取 CSV/Excel —— 
+        private static List<string> ReadCsvHeader(string path)
+        {
+            using var reader = new StreamReader(path, DetectEncoding(path));
+            using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
+            if (!csv.Read()) return new();
+            var header = new List<string>();
+            for (int i = 0; csv.TryGetField<string>(i, out var val); i++) header.Add((val ?? $"col_{i}").Trim());
+            return header;
+        }
         private static List<string[]> ReadCsvRows(string path, int expectedCols)
         {
             var list = new List<string[]>();
@@ -484,79 +602,71 @@ namespace SchemaStudio
             while (csv.Read())
             {
                 var row = new string[expectedCols];
-                for (int i = 0; i < expectedCols; i++)
-                {
-                    csv.TryGetField<string>(i, out var v);
-                    row[i] = v?.Trim() ?? "";
-                }
+                for (int i = 0; i < expectedCols; i++) { csv.TryGetField<string>(i, out var v); row[i] = v?.Trim() ?? ""; }
                 list.Add(row);
             }
             return list;
         }
-
-        private static List<string[]> ReadXlsxRows(string path, int expectedCols)
+        private static List<string> ReadXlsxHeader(string path, string sheet)
+        {
+            using var fs = File.OpenRead(path);
+            using var r  = ExcelReaderFactory.CreateReader(fs);
+            var ds = r.AsDataSet();
+            var t  = ds.Tables.Cast<DataTable>().FirstOrDefault(x => string.Equals(x.TableName, sheet, StringComparison.OrdinalIgnoreCase)) ?? ds.Tables[0];
+            if (t.Rows.Count == 0) return new();
+            var row = t.Rows[0];
+            var list = new List<string>();
+            for (int i = 0; i < t.Columns.Count; i++) list.Add((row[i]?.ToString() ?? $"col_{i}").Trim());
+            return list;
+        }
+        private static List<string[]> ReadXlsxRows(string path, string sheet, int expectedCols)
         {
             var list = new List<string[]>();
             using var fs = File.OpenRead(path);
-            using var reader = ExcelDataReader.ExcelReaderFactory.CreateReader(fs);
-            var ds = reader.AsDataSet();
-            if (ds.Tables.Count == 0) return list;
-            var table = ds.Tables[0];
-            if (table.Rows.Count <= 1) return list;
-
-            for (int r = 1; r < table.Rows.Count; r++)
+            using var r  = ExcelReaderFactory.CreateReader(fs);
+            var ds = r.AsDataSet();
+            var t  = ds.Tables.Cast<DataTable>().FirstOrDefault(x => string.Equals(x.TableName, sheet, StringComparison.OrdinalIgnoreCase)) ?? ds.Tables[0];
+            if (t.Rows.Count <= 1) return list;
+            for (int rr = 1; rr < t.Rows.Count; rr++)
             {
-                var dr = table.Rows[r];
+                var dr = t.Rows[rr];
                 var row = new string[expectedCols];
-                for (int c = 0; c < expectedCols; c++)
-                {
-                    row[c] = dr[c]?.ToString()?.Trim() ?? "";
-                }
+                for (int c = 0; c < expectedCols; c++) row[c] = dr[c]?.ToString()?.Trim() ?? "";
                 list.Add(row);
             }
             return list;
         }
 
+        // —— 其它 —— 
         private static string GetSchemaJsonPath(string tablePath)
             => Path.Combine(Path.GetDirectoryName(tablePath)!, Path.GetFileName(tablePath) + ".schema.json");
-
-        private static List<string> ReadHeaderColumns(string path)
+        private IEnumerable<string> GetAllDirs(string root)
         {
-            var ext = Path.GetExtension(path).ToLowerInvariant();
-            if (ext == ".csv") return ReadCsvHeader(path);
-            if (ext == ".xlsx") return ReadXlsxHeader(path);
-            return new();
+            yield return root;
+            foreach (var d in Directory.GetDirectories(root))
+                foreach (var x in GetAllDirs(d)) yield return x;
         }
-
-        private static List<string> ReadCsvHeader(string path)
+        private void ApplyUiState()
         {
-            using var reader = new StreamReader(path, DetectEncoding(path));
-            using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
-            if (!csv.Read()) return new();
-            var header = new List<string>();
-            for (int i = 0; csv.TryGetField<string>(i, out var val); i++)
-                header.Add((val ?? $"col_{i}").Trim());
-            return header;
-        }
-
-        private static List<string> ReadXlsxHeader(string path)
-        {
-            using var fs = File.OpenRead(path);
-            using var reader = ExcelReaderFactory.CreateReader(fs);
-            var ds = reader.AsDataSet();
-            if (ds.Tables.Count == 0) return new();
-            var table = ds.Tables[0];
-            if (table.Rows.Count == 0) return new();
-            var row = table.Rows[0];
-            var list = new List<string>();
-            for (int i = 0; i < table.Columns.Count; i++)
+            if (string.IsNullOrEmpty(UiStatePath) || !File.Exists(UiStatePath)) return;
+            try
             {
-                var val = row[i]?.ToString() ?? $"col_{i}";
-                list.Add(val.Trim());
+                var state = JsonConvert.DeserializeObject<UiState>(File.ReadAllText(UiStatePath));
+                if (state == null) return;
+                if (state.SplitterDistance > 0 && state.SplitterDistance < split.Width - 80)
+                    split.SplitterDistance = state.SplitterDistance;
+                foreach (DataGridViewColumn c in grid.Columns)
+                    if (state.ColWidths.TryGetValue(c.Name, out var w) && w > 0) c.Width = w;
             }
-            return list;
+            catch { }
         }
-
+        private void SaveUiState()
+        {
+            if (string.IsNullOrEmpty(UiStatePath)) return;
+            var st = new UiState { SplitterDistance = split.SplitterDistance, ColWidths = new Dictionary<string, int>() };
+            foreach (DataGridViewColumn c in grid.Columns) st.ColWidths[c.Name] = c.Width;
+            File.WriteAllText(UiStatePath, JsonConvert.SerializeObject(st, Formatting.Indented));
+        }
         private static Encoding DetectEncoding(string filePath)
         {
             var bytes = File.ReadAllBytes(filePath);
@@ -564,73 +674,23 @@ namespace SchemaStudio
             catch { return Encoding.UTF8; }
         }
 
-        private static JsonSerializerOptions JsonOpt(bool indented = false) => new JsonSerializerOptions
+        private void Grid_CellContentClick(object? sender, DataGridViewCellEventArgs e)
         {
-            WriteIndented = indented,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-        };
-
-        // —— 新建表 —— //
-        private void CreateNewTable()
-        {
-            if (currentDir == null) { MessageBox.Show("请先打开根目录"); return; }
-            var dirs = GetAllDirs(currentDir).ToList();
-            using var dlg = new NewTableForm(currentDir, dirs, registry, AllowedTypes);
-            if (dlg.ShowDialog(this) == DialogResult.OK)
+            if (e.RowIndex < 0) return;
+            var btnColIndex = grid.Columns["prop_btn"]!.Index;
+            if (e.ColumnIndex == btnColIndex && grid.Rows[e.RowIndex].DataBoundItem is ColumnRow row)
             {
-                var destDir = dlg.ResultDir!;
-                var fileName = dlg.ResultFileName!; // 不带扩展
-                var path = Path.Combine(destDir, fileName + ".csv");
-                if (File.Exists(path))
+                if (currentSchema == null) return;
+                var col  = currentSchema.Columns!.First(c => c.ColName == row.ColName);
+                var defs = registry.Properties.Where(d => d.Scope == "column" || d.Scope == "both").ToList();
+
+                using var dlg = new AssignPropertyForm(defs, col.ColProperties ?? new List<PropertyKV>());
+                if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
-                    MessageBox.Show("同名CSV已存在，已取消。");
-                    return;
+                    col.ColProperties = dlg.Result;
+                    row.PropsSummary  = string.Join("; ", (col.ColProperties ?? new()).Select(p => $"{p.PropertyName}={p.PropertyValue}"));
+                    grid.InvalidateRow(e.RowIndex);
                 }
-
-                // 写 CSV（UTF-8 BOM）
-                Directory.CreateDirectory(destDir);
-                using (var sw = new StreamWriter(path, false, new UTF8Encoding(true)))
-                {
-                    sw.WriteLine(string.Join(",", dlg.Columns.Select(c => CsvEscape(c.ColName))));
-                }
-
-                // 生成 schema.json
-                var schema = new TableSchema
-                {
-                    TableName = Path.GetFileName(path),
-                    Columns = dlg.Columns.Select((c, idx) => new ColumnSchema
-                    {
-                        ColName = c.ColName,
-                        ValueType = c.ValueType,
-                        PkOrder = c.PkOrder,
-                        PrimaryKey = c.PkOrder >= 0,
-                        ColSort = idx,
-                        ColProperties = c.ColProperties?.ToList() ?? new List<PropertyKV>()
-                    }).ToList()
-                };
-                var json = JsonSerializer.Serialize(schema, JsonOpt(true));
-                File.WriteAllText(GetSchemaJsonPath(path), json, new UTF8Encoding(false));
-
-                // 刷新树并选中
-                BuildDirectoryTree();
-                SelectPathInTree(path);
-                MessageBox.Show($"已创建：\n{path}\n{path}.schema.json");
-            }
-
-            static string CsvEscape(string s)
-            {
-                if (s.Contains('"') || s.Contains(',') || s.Contains('\n') || s.Contains('\r'))
-                    return "\"" + s.Replace("\"", "\"\"") + "\"";
-                return s;
-            }
-        }
-
-        private IEnumerable<string> GetAllDirs(string root)
-        {
-            yield return root;
-            foreach (var d in Directory.GetDirectories(root))
-            {
-                foreach (var x in GetAllDirs(d)) yield return x;
             }
         }
 
@@ -641,93 +701,92 @@ namespace SchemaStudio
                 var node = FindNode(root, fullPath);
                 if (node != null)
                 {
-                    tree.SelectedNode = node;
-                    node.EnsureVisible();
-                    TryLoadNodeFile(node);
-                    break;
+                    tree.SelectedNode = node; node.EnsureVisible(); break;
                 }
             }
-
             TreeNode? FindNode(TreeNode n, string path)
             {
-                if (n.Tag as string == path) return n;
-                foreach (TreeNode c in n.Nodes)
-                {
-                    var got = FindNode(c, path);
-                    if (got != null) return got;
-                }
+                if (n.Tag is NodeTag t && t.Path == path && t.Sheet == null) return n;
+                foreach (TreeNode c in n.Nodes) { var got = FindNode(c, path); if (got != null) return got; }
                 return null;
             }
         }
     }
 
-    // —— 新建表对话框 —— //
+    // —— 树节点 Tag —— 
+    public record NodeTag(string Path, string? Sheet)
+    {
+        public bool IsExcelFile  => (Path.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) || Path.EndsWith(".xls", StringComparison.OrdinalIgnoreCase)) && Sheet == null;
+        public bool IsExcelSheet => Sheet != null && (Path.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) || Path.EndsWith(".xls", StringComparison.OrdinalIgnoreCase));
+        public bool IsCsv        => Path.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
+        public override string ToString() => Sheet == null ? Path : $"{Path}::{Sheet}";
+    }
+
+    // —— 新建表对话框（多 Sheet，NPOI 写入） —— 
     public class NewTableForm : Form
     {
-        private readonly ComboBox cmbDir;
+        private readonly ComboBox cmbDir, cmbFormat;
         private readonly TextBox txtName;
-        private readonly DataGridView grid;
-        private readonly Button btnAdd, btnDel, btnOk, btnCancel;
-        private readonly BindingList<NewColRow> rows = new();
+        private readonly DataGridView gridCols, gridSheets;
+        private readonly Button btnAddCol, btnDelCol, btnAddSheet, btnDelSheet, btnOk, btnCancel;
+
+        private readonly BindingList<NewColRow> cols = new();
+        private readonly BindingList<SheetNameRow> sheets = new();
+
         private readonly PropertyRegistry registry;
-        private readonly string[] allowedTypes;
+        private readonly string root;
+        private readonly string[] allowed;
 
         public string? ResultDir { get; private set; }
-        public string? ResultFileName { get; private set; } // 不带扩展
-        public IEnumerable<NewColRow> Columns => rows;
+        public string? ResultFileName { get; private set; }
+        public string ResultFormat { get; private set; } = "csv";                 // csv/xlsx/xls
+        public List<string> ResultSheets => sheets.Select(s => s.Name).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        public IEnumerable<NewColRow> Columns => cols;
 
         public NewTableForm(string root, List<string> allDirs, PropertyRegistry reg, string[] allowedTypes)
         {
-            Text = "新建表";
-            Width = 900; Height = 560;
-            registry = reg;
-            this.allowedTypes = allowedTypes;
+            this.root = root; registry = reg; allowed = allowedTypes;
+
+            Text = "新建表"; Width = 980; Height = 640; AutoScaleMode = AutoScaleMode.Font;
 
             var lblDir = new Label { Left = 12, Top = 14, Text = "保存到目录：", AutoSize = true };
-            cmbDir = new ComboBox { Left = 90, Top = 10, Width = 560, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbDir = new ComboBox { Left = 90, Top = 10, Width = 680, DropDownStyle = ComboBoxStyle.DropDownList, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
             cmbDir.Items.AddRange(allDirs.Select(d => d.Replace(root, "").TrimStart(Path.DirectorySeparatorChar)).Select(s => string.IsNullOrEmpty(s) ? "(根目录)" : s).ToArray());
             cmbDir.SelectedIndex = 0;
 
-            var lblName = new Label { Left = 12, Top = 45, Text = "文件名(.csv)：", AutoSize = true };
+            var lblName = new Label { Left = 12, Top = 45, Text = "文件名：", AutoSize = true };
             txtName = new TextBox { Left = 90, Top = 41, Width = 260, Text = "new_table" };
 
-            grid = new DataGridView { Left = 12, Top = 80, Width = 860, Height = 380, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom, AutoGenerateColumns = false, AllowUserToAddRows = false };
-            BuildColsGrid();
+            var lblFmt = new Label { Left = 360, Top = 45, Text = "格式：", AutoSize = true };
+            cmbFormat = new ComboBox { Left = 400, Top = 41, Width = 100, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbFormat.Items.AddRange(new[] { "csv", "xlsx", "xls" });
+            cmbFormat.SelectedIndex = 0;
+            cmbFormat.SelectedIndexChanged += (_, __) =>
+            {
+                ResultFormat = cmbFormat.SelectedItem!.ToString()!;
+                var isExcel = ResultFormat is "xlsx" or "xls";
+                gridSheets.Enabled = btnAddSheet.Enabled = btnDelSheet.Enabled = isExcel;
+                gridSheets.Visible = btnAddSheet.Visible = btnDelSheet.Visible = isExcel;
+            };
 
-            btnAdd = new Button { Text = "添加列", Left = 12, Top = 470, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-            btnDel = new Button { Text = "删除选中", Left = 100, Top = 470, Width = 90, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
-            btnOk  = new Button { Text = "确定", Left = 700, Top = 470, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
-            btnCancel = new Button { Text = "取消", Left = 792, Top = 470, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
-
-            btnAdd.Click += (_, __) => rows.Add(new NewColRow { ColName = $"col_{rows.Count+1}", ValueType = "string", PkOrder = -1 });
-            btnDel.Click += (_, __) => { foreach (DataGridViewRow r in grid.SelectedRows) if (r.DataBoundItem is NewColRow x) rows.Remove(x); };
-            btnOk.Click  += (_, __) => OnOk(root, allDirs);
-            btnCancel.Click += (_, __) => { DialogResult = DialogResult.Cancel; Close(); };
-
-            Controls.AddRange(new Control[] { lblDir, cmbDir, lblName, txtName, grid, btnAdd, btnDel, btnOk, btnCancel });
-
-            // 默认两列示例
-            rows.Add(new NewColRow { ColName = "id", ValueType = "int", PkOrder = 1 });
-            rows.Add(new NewColRow { ColName = "desc", ValueType = "string", PkOrder = -1 });
-        }
-
-        private void BuildColsGrid()
-        {
-            grid.Columns.Clear();
-            grid.DataSource = rows;
-
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "列名", DataPropertyName = nameof(NewColRow.ColName), Width = 240 });
-            grid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "数值类型", DataPropertyName = nameof(NewColRow.ValueType), Width = 140, DataSource = allowedTypes });
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "主键序列", DataPropertyName = nameof(NewColRow.PkOrderText), Width = 120 });
-
+            // 列定义
+            gridCols = new DataGridView
+            {
+                Left = 12, Top = 80, Width = 940, Height = 380,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
+                AutoGenerateColumns = false, AllowUserToAddRows = false
+            };
+            gridCols.DataSource = cols;
+            gridCols.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "列名", DataPropertyName = nameof(NewColRow.ColName), Width = 240 });
+            gridCols.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "数值类型", DataPropertyName = nameof(NewColRow.ValueType), Width = 140, DataSource = allowed });
+            gridCols.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "主键序列", DataPropertyName = nameof(NewColRow.PkOrderText), Width = 120 });
             var btn = new DataGridViewButtonColumn { HeaderText = "列属性", Text = "属性…", UseColumnTextForButtonValue = true, Width = 80 };
-            grid.Columns.Add(btn);
-            grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "属性摘要", DataPropertyName = nameof(NewColRow.PropsSummary), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, ReadOnly = true });
-
-            grid.CellContentClick += (s, e) =>
+            gridCols.Columns.Add(btn);
+            gridCols.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "属性摘要", DataPropertyName = nameof(NewColRow.PropsSummary), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, ReadOnly = true });
+            gridCols.CellContentClick += (s, e) =>
             {
                 if (e.RowIndex < 0) return;
-                if (grid.Columns[e.ColumnIndex] is DataGridViewButtonColumn && grid.Rows[e.RowIndex].DataBoundItem is NewColRow row)
+                if (gridCols.Columns[e.ColumnIndex] is DataGridViewButtonColumn && gridCols.Rows[e.RowIndex].DataBoundItem is NewColRow row)
                 {
                     var defs = registry.Properties.Where(d => d.Scope == "column" || d.Scope == "both").ToList();
                     using var dlg = new AssignPropertyForm(defs, row.ColProperties ?? new List<PropertyKV>());
@@ -735,30 +794,62 @@ namespace SchemaStudio
                     {
                         row.ColProperties = dlg.Result;
                         row.PropsSummary = string.Join("; ", row.ColProperties.Select(p => $"{p.PropertyName}={p.PropertyValue}"));
-                        grid.InvalidateRow(e.RowIndex);
+                        gridCols.InvalidateRow(e.RowIndex);
                     }
                 }
             };
+
+            btnAddCol = new Button { Text = "添加列", Left = 12, Top = 470, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
+            btnDelCol = new Button { Text = "删除选中", Left = 100, Top = 470, Width = 90, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
+            btnAddCol.Click += (_, __) => cols.Add(new NewColRow { ColName = $"col_{cols.Count + 1}", ValueType = "string", PkOrder = -1 });
+            btnDelCol.Click += (_, __) => { foreach (DataGridViewRow r in gridCols.SelectedRows) if (r.DataBoundItem is NewColRow x) cols.Remove(x); };
+
+            // Sheet 列表（仅 Excel 启用）
+            gridSheets = new DataGridView
+            {
+                Left = 12, Top = 510, Width = 480, Height = 80,
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
+                AutoGenerateColumns = false, AllowUserToAddRows = false,
+                Visible = false, Enabled = false
+            };
+            gridSheets.DataSource = sheets;
+            gridSheets.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Sheet 名", DataPropertyName = nameof(SheetNameRow.Name), Width = 360 });
+            btnAddSheet = new Button { Text = "添加Sheet", Left = 510, Top = 516, Width = 90, Anchor = AnchorStyles.Bottom | AnchorStyles.Left, Visible = false, Enabled = false };
+            btnDelSheet = new Button { Text = "删除选中", Left = 610, Top = 516, Width = 90, Anchor = AnchorStyles.Bottom | AnchorStyles.Left, Visible = false, Enabled = false };
+            btnAddSheet.Click += (_, __) => sheets.Add(new SheetNameRow { Name = $"Sheet{sheets.Count + 1}" });
+            btnDelSheet.Click += (_, __) => { foreach (DataGridViewRow r in gridSheets.SelectedRows) if (r.DataBoundItem is SheetNameRow x) sheets.Remove(x); };
+
+            btnOk     = new Button { Text = "确定", Left = 780, Top = 560, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+            btnCancel = new Button { Text = "取消", Left = 872, Top = 560, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+            btnOk.Click += (_, __) => OnOk(allDirs);
+            btnCancel.Click += (_, __) => { DialogResult = DialogResult.Cancel; Close(); };
+
+            Controls.AddRange(new Control[] { lblDir, cmbDir, lblName, txtName, lblFmt, cmbFormat, gridCols, btnAddCol, btnDelCol, gridSheets, btnAddSheet, btnDelSheet, btnOk, btnCancel });
+
+            // 默认两列 + 一个 sheet
+            cols.Add(new NewColRow { ColName = "id",   ValueType = "int",    PkOrder = 1 });
+            cols.Add(new NewColRow { ColName = "desc", ValueType = "string", PkOrder = -1 });
+            sheets.Add(new SheetNameRow { Name = "Sheet1" });
         }
 
-        private void OnOk(string root, List<string> allDirs)
+        private void OnOk(List<string> allDirs)
         {
             var name = (txtName.Text ?? "").Trim();
             if (string.IsNullOrEmpty(name)) { MessageBox.Show("文件名不能为空"); return; }
             if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) { MessageBox.Show("文件名包含非法字符"); return; }
-
-            // 解析目录
             var rel = cmbDir.SelectedItem!.ToString()!;
             string destDir = rel == "(根目录)" ? root : Path.Combine(root, rel.TrimStart(Path.DirectorySeparatorChar));
             if (!allDirs.Contains(destDir)) { MessageBox.Show("目标目录无效"); return; }
+            if (cols.Count == 0) { MessageBox.Show("请至少添加一列"); return; }
 
-            // 校验列
-            if (rows.Count == 0) { MessageBox.Show("请至少添加一列"); return; }
-            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var c in rows)
+            ResultFormat = cmbFormat.SelectedItem!.ToString()!;
+            if (ResultFormat is "xlsx" or "xls")
             {
-                if (string.IsNullOrWhiteSpace(c.ColName)) { MessageBox.Show("存在空的列名"); return; }
-                if (!names.Add(c.ColName.Trim())) { MessageBox.Show($"列名重复：{c.ColName}"); return; }
+                if (sheets.Count == 0) { MessageBox.Show("请至少添加一个工作表"); return; }
+                var valid = sheets.All(s => !string.IsNullOrWhiteSpace(s.Name));
+                if (!valid) { MessageBox.Show("存在空的工作表名"); return; }
+                var distinct = sheets.Select(s => s.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() == sheets.Count;
+                if (!distinct) { MessageBox.Show("工作表名重复"); return; }
             }
 
             ResultDir = destDir;
@@ -776,20 +867,16 @@ namespace SchemaStudio
         public int PkOrder { get; set; } = -1;
         public List<PropertyKV>? ColProperties { get; set; } = new();
         public string PropsSummary { get; set; } = "";
-
         public string PkOrderText
         {
             get => PkOrder < 0 ? string.Empty : PkOrder.ToString();
-            set
-            {
-                if (string.IsNullOrWhiteSpace(value)) PkOrder = -1;
-                else if (int.TryParse(value.Trim(), out var v)) PkOrder = v;
-                else PkOrder = -1;
-                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PkOrderText)));
-            }
+            set { if (string.IsNullOrWhiteSpace(value)) PkOrder = -1; else if (int.TryParse(value.Trim(), out var v)) PkOrder = v; else PkOrder = -1;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PkOrderText))); }
         }
     }
+    public class SheetNameRow { public string Name { get; set; } = "Sheet1"; }
 
+    // —— 绑定模型/Schema —— 
     public class ColumnRow : INotifyPropertyChanged
     {
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -797,73 +884,71 @@ namespace SchemaStudio
         public string ValueType { get; set; } = "string";
         public int PkOrder { get; set; } = -1;
         public string PropsSummary { get; set; } = "";
-
         public string PkOrderText
         {
             get => PkOrder < 0 ? string.Empty : PkOrder.ToString();
-            set
-            {
-                if (string.IsNullOrWhiteSpace(value)) PkOrder = -1;
-                else if (int.TryParse(value.Trim(), out var v)) PkOrder = v;
-                else PkOrder = -1;
-                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PkOrderText)));
-            }
+            set { if (string.IsNullOrWhiteSpace(value)) PkOrder = -1; else if (int.TryParse(value.Trim(), out var v)) PkOrder = v; else PkOrder = -1;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PkOrderText))); }
         }
-
-        public static ColumnRow FromSchema(ColumnSchema c) => new ColumnRow
+        public static ColumnRow FromSchema(ColumnSchema c) => new()
         {
             ColName = c.ColName ?? "",
             ValueType = string.IsNullOrWhiteSpace(c.ValueType) ? "string" : c.ValueType!,
             PkOrder = c.PkOrder,
-            PropsSummary = c.ColProperties == null || c.ColProperties.Count == 0
-                ? ""
-                : string.Join("; ", c.ColProperties.Select(p => $"{p.PropertyName}={p.PropertyValue}"))
+            PropsSummary = c.ColProperties == null || c.ColProperties.Count == 0 ? "" :
+                           string.Join("; ", c.ColProperties.Select(p => $"{p.PropertyName}={p.PropertyValue}"))
         };
     }
 
     public class TableSchema
     {
-        [JsonPropertyName("table_name")] public string? TableName { get; set; }
-        [JsonPropertyName("columns")] public List<ColumnSchema>? Columns { get; set; }
+        [JsonProperty("table_name")] public string? TableName { get; set; }
+        [JsonProperty("columns")]    public List<ColumnSchema>? Columns { get; set; }
     }
-
+    public class WorkbookSchema
+    {
+        [JsonProperty("workbook_name")] public string? WorkbookName { get; set; }
+        [JsonProperty("sheets")]        public List<SheetSchema> Sheets { get; set; } = new();
+    }
+    public class SheetSchema
+    {
+        [JsonProperty("sheet_name")] public string SheetName { get; set; } = "";
+        [JsonProperty("columns")]    public List<ColumnSchema> Columns { get; set; } = new();
+    }
     public class ColumnSchema
     {
-        [JsonPropertyName("col_name")] public string? ColName { get; set; }
-        [JsonPropertyName("value_type")] public string? ValueType { get; set; }
-        [JsonPropertyName("pk_order")] public int PkOrder { get; set; } = -1;
-        [JsonPropertyName("primary_key")] public bool PrimaryKey { get; set; }
-        [JsonPropertyName("col_sort")] public int ColSort { get; set; }
-        [JsonPropertyName("col_properties")] public List<PropertyKV>? ColProperties { get; set; }
+        [JsonProperty("col_name")]       public string? ColName { get; set; }
+        [JsonProperty("value_type")]     public string? ValueType { get; set; }
+        [JsonProperty("pk_order")]       public int PkOrder { get; set; } = -1;
+        [JsonProperty("primary_key")]    public bool PrimaryKey { get; set; }
+        [JsonProperty("col_sort")]       public int ColSort { get; set; }
+        [JsonProperty("col_properties")] public List<PropertyKV>? ColProperties { get; set; }
     }
-
     public class PropertyKV
     {
         public PropertyKV() { }
         public PropertyKV(string name, string value) { PropertyName = name; PropertyValue = value; }
-        [JsonPropertyName("property_name")] public string? PropertyName { get; set; }
-        [JsonPropertyName("property_value")] public string? PropertyValue { get; set; }
+        [JsonProperty("property_name")] public string? PropertyName { get; set; }
+        [JsonProperty("property_value")] public string? PropertyValue { get; set; }
     }
-
     public class PropertyRegistry
     {
-        [JsonPropertyName("version")] public int Version { get; set; } = 1;
-        [JsonPropertyName("properties")] public List<PropertyDef> Properties { get; set; } = new();
+        [JsonProperty("version")]    public int Version { get; set; } = 1;
+        [JsonProperty("properties")] public List<PropertyDef> Properties { get; set; } = new();
     }
-
     public class PropertyDef
     {
-        [JsonPropertyName("key")] public string Key { get; set; } = string.Empty;
-        [JsonPropertyName("title")] public string Title { get; set; } = string.Empty;
-        [JsonPropertyName("scope")] public string Scope { get; set; } = "column";
-        [JsonPropertyName("kind")] public string Kind { get; set; } = "enum"; // 默认枚举（仍兼容其它）
-        [JsonPropertyName("values")] public List<string>? EnumValues { get; set; } = new();
-        [JsonPropertyName("default")] public string? Default { get; set; }
-
+        [JsonProperty("key")]     public string Key { get; set; } = string.Empty;
+        [JsonProperty("title")]   public string Title { get; set; } = string.Empty;
+        [JsonProperty("scope")]   public string Scope { get; set; } = "column";
+        [JsonProperty("kind")]    public string Kind { get; set; } = "enum"; // 默认枚举
+        [JsonProperty("values")]  public List<string>? EnumValues { get; set; } = new();
+        [JsonProperty("default")] public string? Default { get; set; }
         [JsonIgnore] public string Display => string.IsNullOrEmpty(Title) ? Key : $"{Key}（{Title}）";
         public override string ToString() => Display;
     }
 
+    // —— 属性库窗 / 赋值窗 / 校验结果窗 —— 
     public class PropertyLibraryForm : Form
     {
         private readonly ListBox list;
@@ -875,7 +960,7 @@ namespace SchemaStudio
         public PropertyLibraryForm(PropertyRegistry reg)
         {
             Text = "自定义属性库"; Width = 680; Height = 480;
-            working = JsonSerializer.Deserialize<PropertyRegistry>(JsonSerializer.Serialize(reg))!; // 深拷贝
+            working = JsonConvert.DeserializeObject<PropertyRegistry>(JsonConvert.SerializeObject(reg)) ?? new PropertyRegistry(); // 深拷贝
 
             list = new ListBox { Left = 10, Top = 10, Width = 240, Height = 380 };
             list.SelectedIndexChanged += (_, __) => LoadSelected();
@@ -970,7 +1055,7 @@ namespace SchemaStudio
             list.SelectedIndexChanged += (_, __) => { CommitEditor(); RenderEditor(); };
             Controls.Add(list);
 
-            editor = new Panel { Left = 260, Top = 10, Width = 390, Height = 380, BorderStyle = BorderStyle.FixedSingle };
+            editor = new Panel { Left = 260, Top = 10, Width = 390, Height = 380, BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle };
             Controls.Add(editor);
 
             btnOk = new Button { Text = "确定", Left = Width - 200, Top = Height - 90, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
@@ -1033,13 +1118,12 @@ namespace SchemaStudio
                 "enum" => (currentInput as ComboBox)?.SelectedItem?.ToString() ?? string.Empty,
                 "bool" => (currentInput as CheckBox)?.Checked == true ? "true" : "false",
                 "int"  => ((int)(currentInput as NumericUpDown)!.Value).ToString(),
-                _       => (currentInput as TextBox)?.Text ?? string.Empty
+                _      => (currentInput as TextBox)?.Text ?? string.Empty
             };
             map[d.Key] = new PropertyKV(d.Key, val);
         }
     }
 
-    // —— 校验结果窗口 —— //
     public class ValidationResultForm : Form
     {
         private readonly DataGridView grid;
@@ -1082,14 +1166,11 @@ namespace SchemaStudio
 
             bottom.Controls.Add(btnExport);
             bottom.Controls.Add(btnClose);
-
             Controls.Add(grid);
             Controls.Add(bottom);
-
             if (errors.Count == 0) btnExport.Enabled = false;
         }
     }
-
     public class ValidationError
     {
         public int Row { get; set; }
@@ -1099,10 +1180,10 @@ namespace SchemaStudio
         public string Message { get; set; } = "";
     }
 
-    // —— UI 状态（列宽/分割条） —— //
+    // —— UI 状态 —— 
     public class UiState
     {
-        [JsonPropertyName("splitter")] public int SplitterDistance { get; set; }
-        [JsonPropertyName("col_widths")] public Dictionary<string, int> ColWidths { get; set; } = new();
+        [JsonProperty("splitter")] public int SplitterDistance { get; set; }
+        [JsonProperty("col_widths")] public Dictionary<string, int> ColWidths { get; set; } = new();
     }
 }

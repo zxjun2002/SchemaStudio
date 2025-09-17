@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "D:\\project\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj": {}
+    "D:\\project\\schema-studio\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj": {}
   },
   "projects": {
-    "D:\\project\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj": {
+    "D:\\project\\schema-studio\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\project\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj",
+        "projectUniqueName": "D:\\project\\schema-studio\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj",
         "projectName": "SchemaStudio",
-        "projectPath": "D:\\project\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj",
+        "projectPath": "D:\\project\\schema-studio\\SchemaStudio\\SchemaStudio\\SchemaStudio.csproj",
         "packagesPath": "C:\\Users\\zhangxujun\\.nuget\\packages\\",
-        "outputPath": "D:\\project\\SchemaStudio\\SchemaStudio\\obj\\",
+        "outputPath": "D:\\project\\schema-studio\\SchemaStudio\\SchemaStudio\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\zhangxujun\\AppData\\Roaming\\NuGet\\NuGet.Config"
@@ -58,6 +58,10 @@
             "NPOI": {
               "target": "Package",
               "version": "[2.7.4, )"
+            },
+            "Newtonsoft.Json": {
+              "target": "Package",
+              "version": "[13.0.4, )"
             }
           },
           "imports": [
