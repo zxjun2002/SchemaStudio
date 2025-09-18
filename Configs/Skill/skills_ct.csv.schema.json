@@ -1,0 +1,45 @@
+{
+  "table_name": "skills_ct.csv",
+  "columns": [
+    {
+      "col_name": "id",
+      "value_type": "int",
+      "pk_order": -1,
+      "primary_key": false,
+      "col_sort": 0,
+      "col_properties": []
+    },
+    {
+      "col_name": "skill_id",
+      "value_type": "int",
+      "pk_order": -1,
+      "primary_key": false,
+      "col_sort": 1,
+      "col_properties": []
+    },
+    {
+      "col_name": "level",
+      "value_type": "int",
+      "pk_order": -1,
+      "primary_key": false,
+      "col_sort": 2,
+      "col_properties": []
+    },
+    {
+      "col_name": "skill_vale",
+      "value_type": "string",
+      "pk_order": -1,
+      "primary_key": false,
+      "col_sort": 3,
+      "col_properties": []
+    },
+    {
+      "col_name": "priority",
+      "value_type": "int",
+      "pk_order": -1,
+      "primary_key": false,
+      "col_sort": 4,
+      "col_properties": []
+    }
+  ]
+}

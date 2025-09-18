@@ -1,0 +1,21 @@
+{
+  "table_name": "testnew.csv",
+  "columns": [
+    {
+      "col_name": "id",
+      "value_type": "int",
+      "pk_order": 1,
+      "primary_key": true,
+      "col_sort": 0,
+      "col_properties": []
+    },
+    {
+      "col_name": "desc",
+      "value_type": "string",
+      "pk_order": -1,
+      "primary_key": false,
+      "col_sort": 1,
+      "col_properties": []
+    }
+  ]
+}

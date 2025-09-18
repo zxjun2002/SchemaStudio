@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SchemaStudio")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+df654b71d3bab77bf4767ae82b6f766620bd3438")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+30bfb0ca49dca5b08672b549595fbc583868bdb0")]
 [assembly: System.Reflection.AssemblyProductAttribute("SchemaStudio")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SchemaStudio")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
