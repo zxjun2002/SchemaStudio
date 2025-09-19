@@ -27,6 +27,8 @@ namespace SchemaStudio.UI
         public string? ResultDir { get; private set; }
         public string? ResultFileName { get; private set; }
         public string ResultFormat { get; private set; } = "csv";
+        //正在编辑的Sheet名
+        private string? _oldSheetNameEditing;
 
         public List<string> ResultSheets => sheets.Select(s => s.Name).Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
         public Dictionary<string, List<NewColRow>> ResultSheetColumns =>
@@ -163,49 +165,64 @@ namespace SchemaStudio.UI
             gridSheets.DataSource = sheets;
             gridSheets.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Sheet 名", DataPropertyName = nameof(SheetNameRow.Name), Width = 360 });
 
+            gridSheets.CellBeginEdit += (_, e) =>
+            {
+                if (e.RowIndex >= 0 && gridSheets.Rows[e.RowIndex].DataBoundItem is SheetNameRow s)
+                    _oldSheetNameEditing = s.Name;   // 记住旧名
+            };
+
             gridSheets.SelectionChanged += (_, __) =>
             {
+                if (gridSheets.IsCurrentCellInEditMode) return; // 编辑过程中别切数据源
                 BindColsToCurrentSheet();
                 RefreshTablePropSummaryFor(CurrentSheet);
             };
+            
             gridSheets.CellEndEdit += (_, e) =>
             {
                 if (e.RowIndex < 0) return;
+
                 var s = (SheetNameRow)gridSheets.Rows[e.RowIndex].DataBoundItem!;
                 var newName = (s.Name ?? "").Trim();
                 if (string.IsNullOrWhiteSpace(newName))
                 {
                     MessageBox.Show("Sheet 名不能为空");
-                    s.Name = "Sheet1";
+                    s.Name = gridSheets.Rows[e.RowIndex].Tag as string ?? "Sheet1";
                     gridSheets.InvalidateRow(e.RowIndex);
                     return;
                 }
-                var oldName = gridSheets.Rows[e.RowIndex].Tag as string ?? newName;
-                if (!string.Equals(oldName, newName, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (sheetCols.ContainsKey(newName))
-                    {
-                        MessageBox.Show("Sheet 名重复");
-                        s.Name = oldName;
-                        gridSheets.InvalidateRow(e.RowIndex);
-                        return;
-                    }
-                    if (sheetCols.TryGetValue(oldName, out var colsList))
-                    {
-                        sheetCols.Remove(oldName);
-                        sheetCols[newName] = colsList;
-                    }
-                    else sheetCols[newName] = new BindingList<NewColRow>();
-                    gridSheets.Rows[e.RowIndex].Tag = newName;
-                    
-                    if (sheetTableProps.Remove(oldName, out var tp))
-                        sheetTableProps[newName] = tp;
-                    if (!sheetTableProps.ContainsKey(newName))
-                        sheetTableProps[newName] = new List<PropertyKV>();
 
-                    RefreshTablePropSummaryFor(newName);
+                var oldName = _oldSheetNameEditing ?? (gridSheets.Rows[e.RowIndex].Tag as string ?? newName);
+                _oldSheetNameEditing = null;
+
+                // 重名校验（排除没变化的情况）
+                if (!string.Equals(oldName, newName, StringComparison.OrdinalIgnoreCase) &&
+                    sheetCols.ContainsKey(newName))
+                {
+                    MessageBox.Show("Sheet 名重复");
+                    s.Name = oldName;
+                    gridSheets.InvalidateRow(e.RowIndex);
+                    return;
                 }
-                BindColsToCurrentSheet();
+
+                // 迁移列集合
+                if (!sheetCols.TryGetValue(oldName, out var colsList))
+                    colsList = new BindingList<NewColRow>();
+                sheetCols.Remove(oldName);
+                sheetCols[newName] = colsList;
+
+                // 迁移表属性
+                if (sheetTableProps.Remove(oldName, out var tp))
+                    sheetTableProps[newName] = tp;
+                if (!sheetTableProps.ContainsKey(newName))
+                    sheetTableProps[newName] = new List<PropertyKV>();
+
+                // 更新 Tag 记录
+                gridSheets.Rows[e.RowIndex].Tag = newName;
+
+                // 显式重绑，避免绑定到了“改名过程中临时创建的空列表”
+                gridCols.DataSource = sheetCols[newName];
+                RefreshTablePropSummaryFor(newName);
             };
 
             btnAddSheet = new Button { Text = "添加Sheet", Left = 510, Top = 516, Width = 90, Anchor = AnchorStyles.Bottom | AnchorStyles.Left, Visible = false, Enabled = false };

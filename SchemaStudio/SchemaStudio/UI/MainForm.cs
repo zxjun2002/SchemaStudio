@@ -133,9 +133,8 @@ namespace SchemaStudio.UI
             try
             {
                 registry = DataIO.LoadRegistry(RegistryPath);
-                // 默认两项
+                // 默认分表设置
                 EnsureProp("cs_type", "终端类型", "column", "enum", new[] { "ALL","C","S" }, "ALL");
-                EnsureProp("translate_mode", "翻译类型", "column", "enum", new[] { "none","auto","manual" }, "none");
                 DataIO.SaveRegistry(RegistryPath, registry);
             }
             catch (Exception ex)
