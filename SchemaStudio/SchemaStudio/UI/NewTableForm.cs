@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using SchemaStudio.Models;
-using SchemaStudio.Services;
 
 namespace SchemaStudio.UI
 {
@@ -10,9 +9,13 @@ namespace SchemaStudio.UI
         private readonly TextBox txtName;
         private readonly DataGridView gridCols, gridSheets;
         private readonly Button btnAddCol, btnDelCol, btnAddSheet, btnDelSheet, btnOk, btnCancel;
+        private readonly Button btnTableProps;
+        private readonly Label  lblTablePropSummary;
 
         private readonly BindingList<SheetNameRow> sheets = new();
         private readonly Dictionary<string, BindingList<NewColRow>> sheetCols =
+            new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, List<PropertyKV>> sheetTableProps =
             new(StringComparer.OrdinalIgnoreCase);
 
         private string CurrentSheet => GetSelectedSheetNameOrFirst();
@@ -30,6 +33,10 @@ namespace SchemaStudio.UI
             sheetCols.ToDictionary(kv => kv.Key, kv => kv.Value.ToList(), StringComparer.OrdinalIgnoreCase);
         public IEnumerable<NewColRow> Columns =>
             sheetCols.TryGetValue(CurrentSheet, out var list) ? list : Enumerable.Empty<NewColRow>();
+        
+        public Dictionary<string, List<PropertyKV>> ResultSheetTableProps =>
+            sheetTableProps.ToDictionary(kv => kv.Key, kv => kv.Value?.ToList() ?? new List<PropertyKV>(),
+                StringComparer.OrdinalIgnoreCase);
 
         public NewTableForm(string root, List<string> allDirs, PropertyRegistry reg, string[] allowedTypes)
         {
@@ -123,6 +130,28 @@ namespace SchemaStudio.UI
                 foreach (DataGridViewRow r in gridCols.SelectedRows)
                     if (r.DataBoundItem is NewColRow x) list.Remove(x);
             };
+            
+            btnTableProps = new Button { Text = "表属性…", Left = 200, Top = 470, Width = 90, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
+            lblTablePropSummary = new Label { Text = "表属性：—", Left = 300, Top = 475, AutoSize = true, Anchor = AnchorStyles.Bottom | AnchorStyles.Left };
+
+            btnTableProps.Click += (_, __) =>
+            {
+                var defs = registry.Properties.Where(d => d.Scope == "column" || d.Scope == "both").ToList();
+                var key = CurrentSheet;
+                if (!sheetTableProps.TryGetValue(key, out var list))
+                    sheetTableProps[key] = list = new List<PropertyKV>();
+
+                using var dlg = new AssignPropertyForm(defs, list);
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    sheetTableProps[key] = dlg.Result ?? new List<PropertyKV>();
+                    RefreshTablePropSummaryFor(key);
+                }
+            };
+
+            // 把控件加入窗体
+            Controls.Add(btnTableProps);
+            Controls.Add(lblTablePropSummary);
 
             gridSheets = new DataGridView
             {
@@ -134,7 +163,11 @@ namespace SchemaStudio.UI
             gridSheets.DataSource = sheets;
             gridSheets.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Sheet 名", DataPropertyName = nameof(SheetNameRow.Name), Width = 360 });
 
-            gridSheets.SelectionChanged += (_, __) => BindColsToCurrentSheet();
+            gridSheets.SelectionChanged += (_, __) =>
+            {
+                BindColsToCurrentSheet();
+                RefreshTablePropSummaryFor(CurrentSheet);
+            };
             gridSheets.CellEndEdit += (_, e) =>
             {
                 if (e.RowIndex < 0) return;
@@ -164,6 +197,13 @@ namespace SchemaStudio.UI
                     }
                     else sheetCols[newName] = new BindingList<NewColRow>();
                     gridSheets.Rows[e.RowIndex].Tag = newName;
+                    
+                    if (sheetTableProps.Remove(oldName, out var tp))
+                        sheetTableProps[newName] = tp;
+                    if (!sheetTableProps.ContainsKey(newName))
+                        sheetTableProps[newName] = new List<PropertyKV>();
+
+                    RefreshTablePropSummaryFor(newName);
                 }
                 BindColsToCurrentSheet();
             };
@@ -187,15 +227,23 @@ namespace SchemaStudio.UI
                     gridSheets.CurrentCell = gridSheets.Rows[last].Cells[0];
                     gridSheets.Rows[last].Tag = name;
                 }
+                // 新 sheet 的表属性为空集合
+                if (!sheetTableProps.ContainsKey(name)) sheetTableProps[name] = new List<PropertyKV>();
                 BindColsToCurrentSheet();
+                RefreshTablePropSummaryFor(name);
             };
             btnDelSheet.Click += (_, __) =>
             {
                 if (gridSheets.CurrentRow?.DataBoundItem is not SheetNameRow s) return;
                 if (sheets.Count <= 1) { MessageBox.Show("至少保留一个 Sheet"); return; }
                 sheetCols.Remove(s.Name);
+                sheetTableProps.Remove(s.Name);
                 sheets.Remove(s);
                 BindColsToCurrentSheet();
+                if (gridSheets.CurrentRow?.DataBoundItem is SheetNameRow cur)
+                    RefreshTablePropSummaryFor(cur.Name);
+                else
+                    lblTablePropSummary.Text = "表属性：—";
             };
 
             btnOk     = new Button { Text = "确定", Left = 780, Top = 560, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
@@ -208,6 +256,8 @@ namespace SchemaStudio.UI
 
             // 默认 1 个 Sheet + 两列
             var first = "Sheet1";
+            sheetTableProps[first] = new List<PropertyKV>(); // 新增
+            RefreshTablePropSummaryFor(first);               // 新增
             sheets.Add(new SheetNameRow { Name = first });
             sheetCols[first] = new BindingList<NewColRow>
             {
@@ -294,6 +344,16 @@ namespace SchemaStudio.UI
             ResultFileName = name;
             DialogResult = DialogResult.OK;
             Close();
+        }
+        
+        private void RefreshTablePropSummaryFor(string sheet)
+        {
+            if (!sheetTableProps.TryGetValue(sheet, out var list) || list == null || list.Count == 0)
+            {
+                lblTablePropSummary.Text = "表属性：—";
+                return;
+            }
+            lblTablePropSummary.Text = "表属性：" + string.Join("; ", list.Select(p => $"{p.PropertyName}={p.PropertyValue}"));
         }
     }
 }

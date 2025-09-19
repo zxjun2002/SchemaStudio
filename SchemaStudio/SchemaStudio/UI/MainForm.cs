@@ -14,6 +14,8 @@ namespace SchemaStudio.UI
         private readonly SplitContainer split;
         private readonly Panel topBar;
         private readonly Button btnOpenDir, btnSave, btnCheck, btnNewTable, btnPropLib;
+        private readonly Button btnTableProps;
+        private readonly Label lblTablePropSummary;
         private readonly Label lblDir;
         private readonly TreeView tree;
         private readonly DataGridView grid;
@@ -59,6 +61,8 @@ namespace SchemaStudio.UI
             btnCheck    = MakeBtn("检查");
             btnNewTable = MakeBtn("新建表");
             btnPropLib  = MakeBtn("自定义属性");
+            btnTableProps = MakeBtn("表属性…");
+            lblTablePropSummary = new Label { Text = "表属性：—", AutoSize = true, Margin = new Padding(12, 6, 0, 0) };
 
             lblDir = new Label { Text = "未选择目录", AutoSize = true, Margin = new Padding(12, 6, 0, 0) };
             
@@ -67,12 +71,14 @@ namespace SchemaStudio.UI
             btnCheck.Click   += (_, __) => ValidateCurrent();
             btnNewTable.Click+= (_, __) => CreateNewTable();
             btnPropLib.Click += (_, __) => OpenPropertyLibrary();
+            btnTableProps.Click += (_, __) => EditCurrentTableProps();
 
             tips.SetToolTip(btnCheck,   "校验当前表数据与配置的数值类型是否匹配");
             tips.SetToolTip(btnNewTable,"新建 CSV / XLSX / XLS（Excel 可创建多个工作表）");
             tips.SetToolTip(btnPropLib, "编辑列自定义属性库(根目录 schema.registry.json)");
+            tips.SetToolTip(btnTableProps, "为当前表（CSV）或当前工作表（Excel Sheet）设置表属性");
 
-            topBar.Controls.AddRange(new Control[] { btnOpenDir, btnSave, btnCheck, btnNewTable, btnPropLib, lblDir });
+            topBar.Controls.AddRange(new Control[] { btnOpenDir, btnSave, btnCheck, btnNewTable, btnPropLib, btnTableProps, lblDir, lblTablePropSummary});
             split = new SplitContainer { Dock = DockStyle.Fill, SplitterDistance = UiDefaults.LeftTreeWidth };
 
             tree = new TreeView { Dock = DockStyle.Fill, HideSelection = false, ShowLines = true };
@@ -153,6 +159,30 @@ namespace SchemaStudio.UI
                 DataIO.SaveRegistry(RegistryPath, registry);
             }
         }
+        private void EditCurrentTableProps()
+        {
+            if (currentTag == null)
+            {
+                MessageBox.Show("请先选择 CSV 或 Excel 的某个工作表。");
+                return;
+            }
+            if (currentSchema == null)
+            {
+                MessageBox.Show("未加载到当前表结构。");
+                return;
+            }
+
+            // 属性库共用列属性定义即可（scope=column 或 both）
+            var defs = registry.Properties.Where(d => d.Scope == "column" || d.Scope == "both").ToList();
+
+            var existing = currentSchema.TableProperties ?? new List<PropertyKV>();
+            using var dlg = new AssignPropertyForm(defs, existing);
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+            {
+                currentSchema.TableProperties = dlg.Result ?? new List<PropertyKV>();
+                RefreshTablePropSummary();
+            }
+        }
 
         // ======= 目录树（懒加载 Sheet） ======= //
         private void BuildDirectoryTree()
@@ -230,9 +260,15 @@ namespace SchemaStudio.UI
             var dataRowsForGuess = DataIO.ReadCsvRows(path, colNames.Count);
             TypeInference.ApplyRecommendedTypes(cols, dataRowsForGuess);
 
-            currentSchema = new TableSchema { TableName = tableName, Columns = cols };
+            currentSchema = new TableSchema
+            {
+                TableName = tableName,
+                Columns = cols,
+                TableProperties = schema.TableProperties ?? new List<PropertyKV>()
+            };
             rows.Clear(); foreach (var c in cols) rows.Add(ColumnRow.FromSchema(c));
             Text = $"SchemaStudio — {tableName}";
+            RefreshTablePropSummary();
         }
         private void LoadExcelSheet(string path, string sheetName)
         {
@@ -271,9 +307,15 @@ namespace SchemaStudio.UI
                 TypeInference.ApplyRecommendedTypes(cols, dataRowsForGuess);
             }
 
-            currentSchema = new TableSchema { TableName = tableName, Columns = cols };
+            currentSchema = new TableSchema
+            {
+                TableName = tableName,
+                Columns = cols,
+                TableProperties = entry?.SheetProperties ?? new List<PropertyKV>()
+            };
             rows.Clear(); foreach (var c in cols) rows.Add(ColumnRow.FromSchema(c));
             Text = $"SchemaStudio — {tableName}";
+            RefreshTablePropSummary();
         }
         private List<ColumnSchema> MapColumns(List<string> colNames, List<ColumnSchema>? existing)
         {
@@ -286,6 +328,16 @@ namespace SchemaStudio.UI
                 else list.Add(new ColumnSchema { ColName = n, ValueType = "string", PkOrder = -1, PrimaryKey = false, ColSort = i, ColProperties = new() });
             }
             return list;
+        }
+        private void RefreshTablePropSummary()
+        {
+            // 当前 schema 的表属性摘要
+            var kvs = currentSchema?.TableProperties ?? new List<PropertyKV>();
+            string sum = string.Join("; ", kvs
+                .Where(p => !string.IsNullOrWhiteSpace(p.PropertyName))
+                .Select(p => $"{p.PropertyName}={p.PropertyValue}"));
+
+            lblTablePropSummary.Text = string.IsNullOrEmpty(sum) ? "表属性：—" : $"表属性：{sum}";
         }
 
         // ======= 保存 ======= //
@@ -315,6 +367,7 @@ namespace SchemaStudio.UI
                 var entry = currentWorkbook.Sheets.FirstOrDefault(s => s.SheetName.Equals(currentTag.Sheet!, StringComparison.OrdinalIgnoreCase));
                 if (entry == null) { entry = new SheetSchema { SheetName = currentTag.Sheet!, Columns = new() }; currentWorkbook.Sheets.Add(entry); }
                 entry.Columns = currentSchema.Columns!;
+                entry.SheetProperties = currentSchema.TableProperties ?? new List<PropertyKV>();
                 var json = JsonConvert.SerializeObject(currentWorkbook, Formatting.Indented,
                     new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
                 File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
@@ -393,7 +446,8 @@ namespace SchemaStudio.UI
             var destDir  = dlg.ResultDir!;
             var fileBase = dlg.ResultFileName!;
             var fmt      = dlg.ResultFormat;
-            var perSheet = dlg.ResultSheetColumns; // Dictionary<string, List<NewColRow>>
+            var perSheet = dlg.ResultSheetColumns; 
+            var perSheetProps = dlg.ResultSheetTableProps;
 
             string path = Path.Combine(destDir, fileBase + (fmt == "xlsx" ? ".xlsx" : fmt == "xls" ? ".xls" : ".csv"));
             if (File.Exists(path)) { MessageBox.Show("同名文件已存在，已取消。"); return; }
@@ -423,7 +477,9 @@ namespace SchemaStudio.UI
             var jsonPath = DataIO.GetSchemaJsonPath(path);
             if (fmt == "csv" || !wrote)
             {
+                var firstSheetName = perSheet.Keys.FirstOrDefault() ?? "Sheet1";
                 var cols = (perSheet.Count > 0 ? perSheet.First().Value : new List<NewColRow>()).ToList();
+                var propsForCsv = perSheetProps.TryGetValue(firstSheetName, out var p) ? p : new List<PropertyKV>();
                 var schema = new TableSchema
                 {
                     TableName = Path.GetFileName(path),
@@ -431,7 +487,8 @@ namespace SchemaStudio.UI
                     {
                         ColName = c.ColName, ValueType = c.ValueType, PkOrder = c.PkOrder,
                         PrimaryKey = c.PkOrder >= 0, ColSort = idx, ColProperties = c.ColProperties?.ToList() ?? new()
-                    }).ToList()
+                    }).ToList(),
+                    TableProperties = propsForCsv
                 };
                 var json = JsonConvert.SerializeObject(schema, Formatting.Indented,
                     new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
@@ -449,7 +506,8 @@ namespace SchemaStudio.UI
                         {
                             ColName = c.ColName, ValueType = c.ValueType, PkOrder = c.PkOrder,
                             PrimaryKey = c.PkOrder >= 0, ColSort = idx, ColProperties = c.ColProperties?.ToList() ?? new()
-                        }).ToList()
+                        }).ToList(),
+                        SheetProperties = perSheetProps.TryGetValue(kv.Key, out var tp) ? tp : new List<PropertyKV>()
                     }).ToList()
                 };
                 var json = JsonConvert.SerializeObject(wb, Formatting.Indented,

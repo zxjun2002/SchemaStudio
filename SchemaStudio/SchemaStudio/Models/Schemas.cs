@@ -65,8 +65,9 @@ namespace SchemaStudio.Models
     // —— JSON Schema —— //
     public class TableSchema
     {
-        [JsonProperty("table_name")] public string? TableName { get; set; }
-        [JsonProperty("columns")]    public List<ColumnSchema>? Columns { get; set; }
+        [JsonProperty("table_name")]       public string? TableName { get; set; }
+        [JsonProperty("columns")]          public List<ColumnSchema>? Columns { get; set; }
+        [JsonProperty("table_properties")] public List<PropertyKV>? TableProperties { get; set; } = new();
     }
     public class WorkbookSchema
     {
@@ -75,8 +76,9 @@ namespace SchemaStudio.Models
     }
     public class SheetSchema
     {
-        [JsonProperty("sheet_name")] public string SheetName { get; set; } = "";
-        [JsonProperty("columns")]    public List<ColumnSchema> Columns { get; set; } = new();
+        [JsonProperty("sheet_name")]       public string SheetName { get; set; } = "";
+        [JsonProperty("columns")]          public List<ColumnSchema> Columns { get; set; } = new();
+        [JsonProperty("sheet_properties")] public List<PropertyKV>? SheetProperties { get; set; } = new();
     }
     public class ColumnSchema
     {
