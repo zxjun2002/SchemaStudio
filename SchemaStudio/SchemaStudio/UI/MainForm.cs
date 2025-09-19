@@ -31,15 +31,37 @@ namespace SchemaStudio.UI
         public MainForm()
         {
             Text = "SchemaStudio — JSON 可视化编辑器";
-            Width = 1280; Height = 760; AutoScaleMode = AutoScaleMode.Dpi;
+            Width = 1280; Height = 760;
 
-            btnOpenDir = new Button { Text = "打开目录",   Left = 10,  Width = 90, Top = 8 };
-            btnSave    = new Button { Text = "保存JSON",   Left = 110, Width = 90, Top = 8 };
-            btnCheck   = new Button { Text = "检查",       Left = 210, Width = 70, Top = 8 };
-            btnNewTable= new Button { Text = "新建表",     Left = 290, Width = 80, Top = 8 };
-            btnPropLib = new Button { Text = "自定义属性", Left = 380, Width = 110, Top = 8 };
-            lblDir     = new Label  { Text = "未选择目录", AutoSize = true, Left = 510, Top = 12 };
+            //DPI 自适应 + 用系统消息字体
+            AutoScaleMode = AutoScaleMode.Dpi;
+            Font = SystemFonts.MessageBoxFont;
 
+            // 工具：创建自适应按钮
+            Button MakeBtn(string text) => new Button {
+                Text = text,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 0, 8, 0)   // 按钮间距
+            };
+
+            // 顶部栏用 FlowLayoutPanel
+            topBar = new FlowLayoutPanel {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                Padding = new Padding(8, 6, 8, 6)
+            };
+
+            btnOpenDir  = MakeBtn("打开目录");
+            btnSave     = MakeBtn("保存JSON");
+            btnCheck    = MakeBtn("检查");
+            btnNewTable = MakeBtn("新建表");
+            btnPropLib  = MakeBtn("自定义属性");
+
+            lblDir = new Label { Text = "未选择目录", AutoSize = true, Margin = new Padding(12, 6, 0, 0) };
+            
             btnOpenDir.Click += (_, __) => ChooseDir();
             btnSave.Click    += (_, __) => SaveSchema();
             btnCheck.Click   += (_, __) => ValidateCurrent();
@@ -50,23 +72,16 @@ namespace SchemaStudio.UI
             tips.SetToolTip(btnNewTable,"新建 CSV / XLSX / XLS（Excel 可创建多个工作表）");
             tips.SetToolTip(btnPropLib, "编辑列自定义属性库(根目录 schema.registry.json)");
 
-            topBar = new Panel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(8, 6, 8, 6) };
             topBar.Controls.AddRange(new Control[] { btnOpenDir, btnSave, btnCheck, btnNewTable, btnPropLib, lblDir });
-
             split = new SplitContainer { Dock = DockStyle.Fill, SplitterDistance = UiDefaults.LeftTreeWidth };
 
             tree = new TreeView { Dock = DockStyle.Fill, HideSelection = false, ShowLines = true };
-            tree.BeforeExpand += (_, e) =>
-            {
-                if (e.Node?.Tag is NodeTag t && t.IsExcelFile && e.Node.Nodes.Count == 1 && e.Node.Nodes[0].Tag == null)
-                    AddSheetChildren(e.Node, t.Path);
-            };
+            tree.BeforeExpand += (_, e) => { if (e.Node?.Tag is NodeTag t && t.IsExcelFile && e.Node.Nodes.Count == 1 && e.Node.Nodes[0].Tag == null) AddSheetChildren(e.Node, t.Path); };
             tree.AfterSelect += (_, e) => TryLoadNode(e.Node);
             tree.NodeMouseDoubleClick += (_, e) => TryLoadNode(e.Node);
             split.Panel1.Controls.Add(tree);
 
-            grid = new DataGridView
-            {
+            grid = new DataGridView {
                 Dock = DockStyle.Fill,
                 AutoGenerateColumns = false,
                 AllowUserToAddRows = false,
