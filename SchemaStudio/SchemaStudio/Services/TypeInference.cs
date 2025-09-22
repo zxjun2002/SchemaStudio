@@ -33,7 +33,7 @@ namespace SchemaStudio.Services
             }
         }
 
-        public static bool TryParseIntArray(string s, out int[] result, out string reason)
+        private static bool TryParseIntArray(string s, out int[] result, out string reason)
         {
             result = Array.Empty<int>();
             reason = "";
@@ -131,7 +131,7 @@ namespace SchemaStudio.Services
             return sawAny;
         }
 
-        public static string RecommendTypeFromSamples(IEnumerable<string> samples)
+        private static string RecommendTypeFromSamples(IEnumerable<string> samples)
         {
             var list = samples.ToList();
             if (IsAllIntArray(list, out var anyArr) && anyArr) return "int[]";
