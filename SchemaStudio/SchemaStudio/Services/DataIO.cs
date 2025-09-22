@@ -1,16 +1,27 @@
 using CsvHelper;
 using ExcelDataReader;
-using Newtonsoft.Json;
 using NPOI.HSSF.UserModel;
 using NPOI.XSSF.UserModel;
 using System.Data;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Encodings.Web;
 
 namespace SchemaStudio.Services
 {
     internal static class DataIO
     {
+        // 统一 JSON 选项
+        public static readonly JsonSerializerOptions JsonOptions = new()
+        {
+            WriteIndented = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            PropertyNameCaseInsensitive = true,
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        };
+
         // —— 读 —— //
         public static List<string> ReadCsvHeader(string path)
         {
@@ -138,15 +149,14 @@ namespace SchemaStudio.Services
 
         public static void SaveRegistry(string path, Models.PropertyRegistry reg)
         {
-            var json = JsonConvert.SerializeObject(reg, Formatting.Indented,
-                new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+            var json = JsonSerializer.Serialize(reg, JsonOptions);
             File.WriteAllText(path, json, new UTF8Encoding(false));
         }
         public static Models.PropertyRegistry LoadRegistry(string path)
         {
             if (!File.Exists(path)) return new Models.PropertyRegistry();
             var txt = File.ReadAllText(path);
-            return JsonConvert.DeserializeObject<Models.PropertyRegistry>(txt) ?? new Models.PropertyRegistry();
+            return JsonSerializer.Deserialize<Models.PropertyRegistry>(txt, JsonOptions) ?? new Models.PropertyRegistry();
         }
     }
 }

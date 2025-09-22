@@ -1,6 +1,6 @@
-using Newtonsoft.Json;
 using SchemaStudio.Models;
 using System.Globalization;
+using System.Text.Json;
 
 namespace SchemaStudio.Services
 {
@@ -48,7 +48,7 @@ namespace SchemaStudio.Services
 
             try
             {
-                var list = JsonConvert.DeserializeObject<List<int>>(s);
+                var list = JsonSerializer.Deserialize<List<int>>(s);
                 if (list == null) { reason = "不是有效的 JSON 数组（示例：[1,2,3]）"; return false; }
                 result = list.ToArray();
                 return true;

@@ -1,5 +1,6 @@
-using Newtonsoft.Json;
+using System.Text.Json;
 using SchemaStudio.Models;
+using SchemaStudio.Services;
 
 namespace SchemaStudio.UI
 {
@@ -14,7 +15,10 @@ namespace SchemaStudio.UI
         public PropertyLibraryForm(PropertyRegistry reg)
         {
             Text = "自定义属性库"; Width = 680; Height = 480;
-            working = JsonConvert.DeserializeObject<PropertyRegistry>(JsonConvert.SerializeObject(reg)) ?? new PropertyRegistry();
+            // 用 System.Text.Json 做深拷贝，保持与全局 JsonOptions 一致
+            working = JsonSerializer.Deserialize<PropertyRegistry>(
+                          JsonSerializer.Serialize(reg, DataIO.JsonOptions),
+                          DataIO.JsonOptions) ?? new PropertyRegistry();
 
             list = new ListBox { Left = 10, Top = 10, Width = 240, Height = 380 };
             list.SelectedIndexChanged += (_, __) => LoadSelected();
@@ -37,7 +41,14 @@ namespace SchemaStudio.UI
             btnDel = new Button { Left = L + 110, Top = y + 10, Text = "删除", Width = 80 };
             btnSave = new Button { Left = L + 200, Top = y + 10, Text = "保存条目", Width = 90 };
             btnAdd.Click += (_, __) => { txtKey.Text = txtTitle.Text = txtEnum.Text = txtDefault.Text = ""; list.ClearSelected(); };
-            btnDel.Click += (_, __) => { if (list.SelectedItem is PropertyDef d) { working.Properties.RemoveAll(p => p.Key.Equals(d.Key, StringComparison.OrdinalIgnoreCase)); RefreshList(); } };
+            btnDel.Click += (_, __) =>
+            {
+                if (list.SelectedItem is PropertyDef d)
+                {
+                    working.Properties.RemoveAll(p => p.Key.Equals(d.Key, StringComparison.OrdinalIgnoreCase));
+                    RefreshList();
+                }
+            };
             btnSave.Click += (_, __) => SaveCurrent();
             Controls.AddRange(new Control[] { btnAdd, btnDel, btnSave });
 
@@ -57,6 +68,7 @@ namespace SchemaStudio.UI
             list.DisplayMember = nameof(PropertyDef.Display);
             if (list.Items.Count > 0 && list.SelectedIndex < 0) list.SelectedIndex = 0;
         }
+
         private void LoadSelected()
         {
             if (list.SelectedItem is PropertyDef d)
@@ -66,21 +78,29 @@ namespace SchemaStudio.UI
                 txtDefault.Text = d.Default ?? "";
             }
         }
+
         private void SaveCurrent()
         {
-            var key = txtKey.Text.Trim(); if (string.IsNullOrEmpty(key)) { MessageBox.Show("key 不能为空"); return; }
+            var key = txtKey.Text.Trim();
+            if (string.IsNullOrEmpty(key)) { MessageBox.Show("key 不能为空"); return; }
+
             var def = working.Properties.FirstOrDefault(p => p.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
             if (def == null)
             {
                 def = new PropertyDef { Key = key, Scope = "column", Kind = "enum" };
                 working.Properties.Add(def);
             }
+
             def.Title = txtTitle.Text.Trim();
             def.Scope = "column";
             def.Kind  = string.IsNullOrEmpty(def.Kind) ? "enum" : def.Kind;
-            def.EnumValues = txtEnum.Text.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                                         .Select(s => s.Trim()).Distinct().ToList();
+            def.EnumValues = txtEnum.Text
+                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => s.Trim())
+                .Distinct()
+                .ToList();
             def.Default = txtDefault.Text.Trim();
+
             RefreshList();
         }
     }

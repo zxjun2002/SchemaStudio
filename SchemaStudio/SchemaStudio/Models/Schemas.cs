@@ -1,5 +1,5 @@
-using Newtonsoft.Json;
 using System.ComponentModel;
+using System.Text.Json.Serialization;
 
 namespace SchemaStudio.Models
 {
@@ -65,29 +65,29 @@ namespace SchemaStudio.Models
     // —— JSON Schema —— //
     public class TableSchema
     {
-        [JsonProperty("table_name")]       public string? TableName { get; set; }
-        [JsonProperty("columns")]          public List<ColumnSchema>? Columns { get; set; }
-        [JsonProperty("table_properties")] public List<PropertyKV>? TableProperties { get; set; } = new();
+        [JsonPropertyName("table_name")]       public string? TableName { get; set; }
+        [JsonPropertyName("columns")]          public List<ColumnSchema>? Columns { get; set; }
+        [JsonPropertyName("table_properties")] public List<PropertyKV>? TableProperties { get; set; } = new();
     }
     public class WorkbookSchema
     {
-        [JsonProperty("workbook_name")] public string? WorkbookName { get; set; }
-        [JsonProperty("sheets")]        public List<SheetSchema> Sheets { get; set; } = new();
+        [JsonPropertyName("workbook_name")] public string? WorkbookName { get; set; }
+        [JsonPropertyName("sheets")]        public List<SheetSchema> Sheets { get; set; } = new();
     }
     public class SheetSchema
     {
-        [JsonProperty("sheet_name")]       public string SheetName { get; set; } = "";
-        [JsonProperty("columns")]          public List<ColumnSchema> Columns { get; set; } = new();
-        [JsonProperty("sheet_properties")] public List<PropertyKV>? SheetProperties { get; set; } = new();
+        [JsonPropertyName("sheet_name")]       public string SheetName { get; set; } = "";
+        [JsonPropertyName("columns")]          public List<ColumnSchema> Columns { get; set; } = new();
+        [JsonPropertyName("sheet_properties")] public List<PropertyKV>? SheetProperties { get; set; } = new();
     }
     public class ColumnSchema
     {
-        [JsonProperty("col_name")]       public string? ColName { get; set; }
-        [JsonProperty("value_type")]     public string? ValueType { get; set; }
-        [JsonProperty("pk_order")]       public int PkOrder { get; set; } = -1;
-        [JsonProperty("primary_key")]    public bool PrimaryKey { get; set; }
-        [JsonProperty("col_sort")]       public int ColSort { get; set; }
-        [JsonProperty("col_properties")] public List<PropertyKV>? ColProperties { get; set; }
+        [JsonPropertyName("col_name")]       public string? ColName { get; set; }
+        [JsonPropertyName("value_type")]     public string? ValueType { get; set; }
+        [JsonPropertyName("pk_order")]       public int PkOrder { get; set; } = -1;
+        [JsonPropertyName("primary_key")]    public bool PrimaryKey { get; set; }
+        [JsonPropertyName("col_sort")]       public int ColSort { get; set; }
+        [JsonPropertyName("col_properties")] public List<PropertyKV>? ColProperties { get; set; }
     }
 
     // —— 属性库 —— //
@@ -95,22 +95,22 @@ namespace SchemaStudio.Models
     {
         public PropertyKV() { }
         public PropertyKV(string name, string value) { PropertyName = name; PropertyValue = value; }
-        [JsonProperty("property_name")] public string? PropertyName { get; set; }
-        [JsonProperty("property_value")] public string? PropertyValue { get; set; }
+        [JsonPropertyName("property_name")] public string? PropertyName { get; set; }
+        [JsonPropertyName("property_value")] public string? PropertyValue { get; set; }
     }
     public class PropertyRegistry
     {
-        [JsonProperty("version")]    public int Version { get; set; } = 1;
-        [JsonProperty("properties")] public List<PropertyDef> Properties { get; set; } = new();
+        [JsonPropertyName("version")]    public int Version { get; set; } = 1;
+        [JsonPropertyName("properties")] public List<PropertyDef> Properties { get; set; } = new();
     }
     public class PropertyDef
     {
-        [JsonProperty("key")]     public string Key { get; set; } = string.Empty;
-        [JsonProperty("title")]   public string Title { get; set; } = string.Empty;
-        [JsonProperty("scope")]   public string Scope { get; set; } = "column";
-        [JsonProperty("kind")]    public string Kind { get; set; } = "enum";
-        [JsonProperty("values")]  public List<string>? EnumValues { get; set; } = new();
-        [JsonProperty("default")] public string? Default { get; set; }
+        [JsonPropertyName("key")]     public string Key { get; set; } = string.Empty;
+        [JsonPropertyName("title")]   public string Title { get; set; } = string.Empty;
+        [JsonPropertyName("scope")]   public string Scope { get; set; } = "column";
+        [JsonPropertyName("kind")]    public string Kind { get; set; } = "enum";
+        [JsonPropertyName("values")]  public List<string>? EnumValues { get; set; } = new();
+        [JsonPropertyName("default")] public string? Default { get; set; }
         [JsonIgnore] public string Display => string.IsNullOrEmpty(Title) ? Key : $"{Key}（{Title}）";
         public override string ToString() => Display;
     }

@@ -1,6 +1,6 @@
 using System.ComponentModel;
 using System.Text;
-using Newtonsoft.Json;
+using System.Text.Json;
 using NPOI.HSSF.UserModel;
 using NPOI.SS.UserModel;
 using NPOI.XSSF.UserModel;
@@ -252,7 +252,7 @@ namespace SchemaStudio.UI
             if (colNames.Count == 0) { MessageBox.Show("未能读取到列名。请确认第1行是字段名。"); return; }
 
             var schema = File.Exists(jsonPath)
-                ? JsonConvert.DeserializeObject<TableSchema>(File.ReadAllText(jsonPath)) ?? new TableSchema { TableName = tableName }
+                ? JsonSerializer.Deserialize<TableSchema>(File.ReadAllText(jsonPath), DataIO.JsonOptions) ?? new TableSchema { TableName = tableName }
                 : new TableSchema { TableName = tableName };
 
             var cols = MapColumns(colNames, schema.Columns);
@@ -278,13 +278,13 @@ namespace SchemaStudio.UI
             if (colNames.Count == 0) { MessageBox.Show("未能读取到列名。请确认第1行是字段名。"); return; }
 
             currentWorkbook = File.Exists(jsonPath)
-                ? JsonConvert.DeserializeObject<WorkbookSchema>(File.ReadAllText(jsonPath))
+                ? JsonSerializer.Deserialize<WorkbookSchema>(File.ReadAllText(jsonPath), DataIO.JsonOptions)
                 : null;
 
             // 兼容历史：单表 JSON
             if (currentWorkbook == null && File.Exists(jsonPath))
             {
-                var legacy = JsonConvert.DeserializeObject<TableSchema>(File.ReadAllText(jsonPath));
+                var legacy = JsonSerializer.Deserialize<TableSchema>(File.ReadAllText(jsonPath), DataIO.JsonOptions);
                 if (legacy?.Columns != null)
                 {
                     currentWorkbook = new WorkbookSchema
@@ -356,8 +356,7 @@ namespace SchemaStudio.UI
 
             if (currentTag.IsCsv)
             {
-                var json = JsonConvert.SerializeObject(currentSchema, Formatting.Indented,
-                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                var json = JsonSerializer.Serialize(currentSchema, DataIO.JsonOptions);
                 File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
             }
             else if (currentTag.IsExcelSheet)
@@ -367,8 +366,7 @@ namespace SchemaStudio.UI
                 if (entry == null) { entry = new SheetSchema { SheetName = currentTag.Sheet!, Columns = new() }; currentWorkbook.Sheets.Add(entry); }
                 entry.Columns = currentSchema.Columns!;
                 entry.SheetProperties = currentSchema.TableProperties ?? new List<PropertyKV>();
-                var json = JsonConvert.SerializeObject(currentWorkbook, Formatting.Indented,
-                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                var json = JsonSerializer.Serialize(currentWorkbook, DataIO.JsonOptions);
                 File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
             }
             else if (currentTag.IsExcelFile)
@@ -489,8 +487,7 @@ namespace SchemaStudio.UI
                     }).ToList(),
                     TableProperties = propsForCsv
                 };
-                var json = JsonConvert.SerializeObject(schema, Formatting.Indented,
-                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                var json = JsonSerializer.Serialize(schema, DataIO.JsonOptions);
                 File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
             }
             else
@@ -509,8 +506,7 @@ namespace SchemaStudio.UI
                         SheetProperties = perSheetProps.TryGetValue(kv.Key, out var tp) ? tp : new List<PropertyKV>()
                     }).ToList()
                 };
-                var json = JsonConvert.SerializeObject(wb, Formatting.Indented,
-                    new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore });
+                var json = JsonSerializer.Serialize(wb, DataIO.JsonOptions);
                 File.WriteAllText(jsonPath, json, new UTF8Encoding(false));
             }
 
