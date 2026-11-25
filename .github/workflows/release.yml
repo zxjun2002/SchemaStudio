@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（例如 v1.0.0；留空则使用 dev-<sha>）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve version
+        id: meta
+        run: |
+          $isTag = $env:GITHUB_REF_TYPE -eq 'tag'
+          if ($isTag) {
+            $tag = $env:GITHUB_REF_NAME
+          } elseif (-not [string]::IsNullOrWhiteSpace('${{ inputs.version }}')) {
+            $tag = '${{ inputs.version }}'.Trim()
+          } else {
+            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+            $tag = "dev-$shortSha"
+          }
+
+          $clean = $tag.TrimStart('v', 'V')
+          if ($clean -match '^(\d+\.\d+\.\d+)') {
+            $fileVersion = "$($Matches[1]).0"
+            $packageVersion = $clean
+          } else {
+            $fileVersion = '0.0.0.0'
+            $packageVersion = '0.0.0-dev'
+          }
+          $isPrerelease = ($clean -match '-') -or (-not $isTag)
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
+          "file_version=$fileVersion" >> $env:GITHUB_OUTPUT
+          "is_tag=$($isTag.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          "is_prerelease=$($isPrerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      - name: Restore dependencies
+        run: dotnet restore SchemaStudio/SchemaStudio.sln
+
+      - name: Run checks
+        run: dotnet run --project SchemaStudio/SchemaStudio.Checks/SchemaStudio.Checks.csproj -c Release
+
+      - name: Publish standalone win-x64 EXE (no .NET runtime required)
+        run: |
+          dotnet publish SchemaStudio/SchemaStudio/SchemaStudio.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:DebugType=none `
+            -p:DebugSymbols=false `
+            -p:Version=${{ steps.meta.outputs.package_version }} `
+            -p:AssemblyVersion=${{ steps.meta.outputs.file_version }} `
+            -p:FileVersion=${{ steps.meta.outputs.file_version }} `
+            -p:InformationalVersion=${{ steps.meta.outputs.tag }} `
+            -o dist/standalone
+
+      - name: Publish lightweight win-x64 EXE (requires .NET 8 Desktop Runtime)
+        run: |
+          dotnet publish SchemaStudio/SchemaStudio/SchemaStudio.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -p:PublishSingleFile=true `
+            -p:DebugType=none `
+            -p:DebugSymbols=false `
+            -p:Version=${{ steps.meta.outputs.package_version }} `
+            -p:AssemblyVersion=${{ steps.meta.outputs.file_version }} `
+            -p:FileVersion=${{ steps.meta.outputs.file_version }} `
+            -p:InformationalVersion=${{ steps.meta.outputs.tag }} `
+            -o dist/lightweight
+
+      - name: Package release archives & checksums
+        run: |
+          $tag = '${{ steps.meta.outputs.tag }}'
+          New-Item -ItemType Directory -Force -Path dist/release | Out-Null
+
+          Copy-Item README.md dist/standalone/README.md
+          Copy-Item README.md dist/lightweight/README.md
+
+          $standaloneZip = "dist/release/SchemaStudio-$tag-win-x64-standalone.zip"
+          $lightZip = "dist/release/SchemaStudio-$tag-win-x64.zip"
+
+          Compress-Archive -Path dist/standalone/* -DestinationPath $standaloneZip -Force
+          Compress-Archive -Path dist/lightweight/* -DestinationPath $lightZip -Force
+
+          $hashes = Get-ChildItem dist/release/*.zip | Sort-Object Name | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)"
+          }
+          Set-Content -Path dist/release/SHA256SUMS.txt -Value $hashes -Encoding UTF8
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SchemaStudio-${{ steps.meta.outputs.tag }}
+          path: dist/release/*
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: steps.meta.outputs.is_tag == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ steps.meta.outputs.tag }}'
+          $files = @(Get-ChildItem dist/release/* | ForEach-Object { $_.FullName })
+          $ghArgs = @('release', 'create', $tag) + $files + @(
+            '--title', "SchemaStudio $tag",
+            '--generate-notes'
+          )
+          if ('${{ steps.meta.outputs.is_prerelease }}' -eq 'true') {
+            $ghArgs += '--prerelease'
+          }
+          gh @ghArgs
