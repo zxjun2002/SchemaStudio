@@ -77,8 +77,9 @@ public static class DocumentStore
         doc.HasExternalLinks = zip.Entries.Any(e => e.FullName.StartsWith("xl/externalLinks/", StringComparison.OrdinalIgnoreCase)) ||
             workbook.Descendants(Main + "externalReference").Any();
         if (doc.HasExternalLinks) doc.Notices.Add("包含外部工作簿链接：保留链接和缓存，不联网更新；依赖结果需在 Excel 中重算。");
-        if (zip.Entries.Any(e => e.FullName.StartsWith("_xmlsignatures/", StringComparison.OrdinalIgnoreCase)))
-            doc.ReadOnlyReason = "此工作簿有数字签名，编辑会使签名失效；仅可查看和配置属性。";
+        doc.ReadOnlyReason = zip.Entries.Any(e => e.FullName.StartsWith("_xmlsignatures/", StringComparison.OrdinalIgnoreCase))
+            ? "此工作簿有数字签名且 Excel 数据为只读；仅可查看数据和配置 .schema.json 属性。"
+            : "Excel 数据为只读（避免破坏公式、样式和链接）；可在此配置字段类型、主键与属性，需改数据时请点击「外部打开」在 Excel 中编辑后重新加载。";
         foreach (var element in workbook.Descendants(Main + "sheet"))
         {
             string name = (string)element.Attribute("name")!;
@@ -203,18 +204,14 @@ public static class DocumentStore
                 var column = old?.FirstOrDefault(c => string.Equals(c.ColName, sheet.Columns[i].ColName, StringComparison.OrdinalIgnoreCase));
                 if (column == null)
                 {
-                    if (!doc.IsCsv)
-                    {
-                        var values = Enumerable.Range(1, Math.Min(120, sheet.RowCount)).Select(row => sheet.Cell(row, i)).Where(c => c.Text.Length > 0 && !c.IsFormula).ToList();
-                        if (values.Count > 0 && values.All(c => c.Kind == "boolean")) sheet.Columns[i].ValueType = "bool";
-                        else if (values.Count > 0 && values.All(c => c.Kind == "number"))
-                            sheet.Columns[i].ValueType = values.All(c => int.TryParse(c.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out _)) ? "int" :
-                                values.All(c => long.TryParse(c.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out _)) ? "long" : "double";
-                    }
+                    sheet.Columns[i].ValueType = TypeInference.InferColumnType(sheet, i, doc.IsCsv);
+                    sheet.Columns[i].IsConfigured = true;
                     continue;
                 }
                 column.ColSort = i;
-                column.IsConfigured = !string.IsNullOrWhiteSpace(column.ValueType);
+                if (string.IsNullOrWhiteSpace(column.ValueType))
+                    column.ValueType = TypeInference.InferColumnType(sheet, i, doc.IsCsv);
+                column.IsConfigured = true;
                 column.HasStoredDefinition = true;
                 if (column.PrimaryKey && column.PkOrder < 0) column.PkOrder = i;
                 sheet.Columns[i] = column;
@@ -244,6 +241,61 @@ public static class DocumentStore
         return JsonSerializer.Serialize(envelope, DataIO.JsonOptions);
     }
 
+    public static bool NeedsSchemaSync(EditorDocument doc)
+    {
+        var validSheets = doc.Sheets.Where(s => s.SchemaIssue == null && s.Columns.Count > 0).ToList();
+        if (validSheets.Count == 0) return false;
+        if (doc.SchemaBytes == null) return true;
+        return validSheets.Any(s =>
+            s.Columns.Any(c => !c.HasStoredDefinition) ||
+            (!doc.IsCsv && (doc.SchemaEnvelope == null || !doc.SchemaEnvelope.Sheets.Any(e => e.SheetName == s.Name))));
+    }
+
+    public static (int Created, int Updated, List<string> Errors) EnsureDirectorySchemas(string rootDirectory, IReadOnlySet<string>? skipPaths = null)
+    {
+        int created = 0, updated = 0;
+        var errors = new List<string>();
+        if (!Directory.Exists(rootDirectory)) return (0, 0, errors);
+
+        var stack = new Stack<string>();
+        stack.Push(rootDirectory);
+        while (stack.Count > 0)
+        {
+            string dir = stack.Pop();
+            IEnumerable<string> subDirs;
+            try { subDirs = Directory.GetDirectories(dir); } catch { continue; }
+            foreach (string sub in subDirs)
+            {
+                string name = Path.GetFileName(sub);
+                if (name.StartsWith('.') || name is "bin" or "obj") continue;
+                try { if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue; } catch { continue; }
+                stack.Push(sub);
+            }
+
+            IEnumerable<string> files;
+            try { files = Directory.GetFiles(dir); } catch { continue; }
+            foreach (string file in files)
+            {
+                string fileName = Path.GetFileName(file);
+                if (fileName.StartsWith("~$") || !UiDefaults.FileExts.Contains(Path.GetExtension(file).ToLowerInvariant())) continue;
+                if (skipPaths != null && skipPaths.Contains(Path.GetFullPath(file))) continue;
+                try
+                {
+                    var doc = Open(file);
+                    if (!NeedsSchemaSync(doc)) continue;
+                    bool isNew = doc.SchemaBytes == null;
+                    Save(doc);
+                    if (isNew) created++; else updated++;
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{fileName}: {ex.Message}");
+                }
+            }
+        }
+        return (created, updated, errors);
+    }
+
     public static bool HasDataChanges(EditorDocument doc) => doc.Sheets.Any(s => s.RowCount != s.OriginalRowCount || s.Columns.Count != s.OriginalColumnCount || s.Cells.Count != s.OriginalCells.Count ||
         s.Cells.Any(c => !s.OriginalCells.TryGetValue(c.Key, out var original) || c.Value != original));
 
@@ -256,8 +308,8 @@ public static class DocumentStore
         bool dataChanged = HasDataChanges(doc);
         if (dataChanged)
         {
-            if (doc.ReadOnlyReason != null) throw new InvalidOperationException(doc.ReadOnlyReason);
-            source = doc.IsCsv ? WriteCsv(doc) : PatchXlsx(doc);
+            if (doc.ReadOnlyReason != null || !doc.IsCsv) throw new InvalidOperationException(doc.ReadOnlyReason ?? "Excel 数据为只读，仅保存 .schema.json 配置。");
+            source = WriteCsv(doc);
         }
         byte[] schema = new UTF8Encoding(false).GetBytes(SchemaJson(doc));
         string backupDirectory = Path.Combine(Path.GetDirectoryName(doc.Path)!, ".schemastudio-backups");
@@ -314,72 +366,6 @@ public static class DocumentStore
         return stream.ToArray();
     }
 
-    private static byte[] PatchXlsx(EditorDocument doc)
-    {
-        using var buffer = new MemoryStream();
-        buffer.Write(doc.SourceBytes);
-        using (var zip = new ZipArchive(buffer, ZipArchiveMode.Update, true))
-        {
-            foreach (var sheet in doc.Sheets)
-            {
-                var changes = sheet.Cells.Keys.Union(sheet.OriginalCells.Keys).Where(key => sheet.Cells.GetValueOrDefault(key) != sheet.OriginalCells.GetValueOrDefault(key)).ToList();
-                if (changes.Count == 0 && sheet.RowCount == sheet.OriginalRowCount && sheet.Columns.Count == sheet.OriginalColumnCount) continue;
-                var xml = ReadXml(zip, sheet.PartPath!);
-                var data = xml.Root!.Element(Main + "sheetData")!;
-                foreach (string address in changes)
-                {
-                    var position = EditorSheet.Position(address);
-                    if (sheet.OriginalCells.GetValueOrDefault(address)?.IsFormula == true || sheet.ProtectionAt(position.Row, position.Column) != null)
-                        throw new InvalidOperationException("受保护单元格不能写入：" + sheet.Name + "!" + address);
-                    var row = data.Elements(Main + "row").FirstOrDefault(r => (int?)r.Attribute("r") == position.Row + 1);
-                    if (row == null)
-                    {
-                        row = new XElement(Main + "row", new XAttribute("r", position.Row + 1));
-                        var next = data.Elements(Main + "row").FirstOrDefault(r => (int?)r.Attribute("r") > position.Row + 1);
-                        if (next == null) data.Add(row); else next.AddBeforeSelf(row);
-                    }
-                    var cell = row.Elements(Main + "c").FirstOrDefault(c => (string?)c.Attribute("r") == address);
-                    if (cell == null)
-                    {
-                        cell = new XElement(Main + "c", new XAttribute("r", address));
-                        var next = row.Elements(Main + "c").FirstOrDefault(c => EditorSheet.Position((string)c.Attribute("r")!).Column > position.Column);
-                        if (next == null) row.Add(cell); else next.AddBeforeSelf(cell);
-                    }
-                    cell.Elements().Where(e => e.Name == Main + "f" || e.Name == Main + "v" || e.Name == Main + "is").Remove();
-                    var value = sheet.Cells.GetValueOrDefault(address) ?? new EditorCell("");
-                    cell.SetAttributeValue("t", null);
-                    switch (value.Kind)
-                    {
-                        case "formula": throw new InvalidOperationException("本工具不创建或改写公式。");
-                        case "number": cell.AddFirst(new XElement(Main + "v", value.Text)); break;
-                        case "boolean": cell.SetAttributeValue("t", "b"); cell.AddFirst(new XElement(Main + "v", bool.Parse(value.Text) ? "1" : "0")); break;
-                        default:
-                            cell.SetAttributeValue("t", "inlineStr");
-                            cell.AddFirst(new XElement(Main + "is", new XElement(Main + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), EncodeText(value.Text))));
-                            break;
-                    }
-                }
-                var dimension = xml.Root.Element(Main + "dimension");
-                dimension?.SetAttributeValue("ref", "A1:" + EditorSheet.Address(sheet.RowCount, sheet.Columns.Count - 1));
-                ReplaceXml(zip, sheet.PartPath!, xml);
-            }
-            var workbook = ReadXml(zip, "xl/workbook.xml");
-            var calc = workbook.Root!.Element(Main + "calcPr");
-            if (calc == null) { calc = new XElement(Main + "calcPr"); var before = workbook.Root.Elements().FirstOrDefault(e => e.Name.LocalName is "oleSize" or "customWorkbookViews" or "pivotCaches" or "smartTagPr" or "smartTagTypes" or "webPublishing" or "fileRecoveryPr" or "webPublishObjects" or "extLst"); if (before == null) workbook.Root.Add(calc); else before.AddBeforeSelf(calc); }
-            calc.SetAttributeValue("fullCalcOnLoad", "1"); calc.SetAttributeValue("forceFullCalc", "1");
-            ReplaceXml(zip, "xl/workbook.xml", workbook);
-            // The chain is a disposable calculation-order cache, not formula definitions.
-            zip.GetEntry("xl/calcChain.xml")?.Delete();
-            var rels = ReadXml(zip, "xl/_rels/workbook.xml.rels");
-            var chainRels = rels.Root!.Elements().Where(e => ((string?)e.Attribute("Type"))?.EndsWith("/calcChain") == true).ToList();
-            if (chainRels.Count > 0) { chainRels.Remove(); ReplaceXml(zip, "xl/_rels/workbook.xml.rels", rels); }
-            var types = ReadXml(zip, "[Content_Types].xml");
-            var chainTypes = types.Root!.Elements().Where(e => ((string?)e.Attribute("PartName")) == "/xl/calcChain.xml").ToList();
-            if (chainTypes.Count > 0) { chainTypes.Remove(); ReplaceXml(zip, "[Content_Types].xml", types); }
-        }
-        return buffer.ToArray();
-    }
-
     private static void CheckUnchanged(string path, byte[]? expected)
     {
         bool exists = File.Exists(path);
@@ -404,21 +390,9 @@ public static class DocumentStore
     private static string ReadText(XElement? element) => element == null ? "" :
         System.Text.RegularExpressions.Regex.Replace(string.Concat(element.Descendants(Main + "t").Where(t => t.Parent?.Name != Main + "rPh").Select(t => t.Value)),
             "_x([0-9a-fA-F]{4})_", match => ((char)Convert.ToInt32(match.Groups[1].Value, 16)).ToString());
-    private static string EncodeText(string value)
-    {
-        value = System.Text.RegularExpressions.Regex.Replace(value, "_(?=x[0-9a-fA-F]{4}_)", "_x005F_");
-        return System.Text.RegularExpressions.Regex.Replace(value, "[\\x00-\\x08\\x0B-\\x1F\\uFFFE\\uFFFF]", match => "_x" + ((int)match.Value[0]).ToString("X4") + "_");
-    }
     private static XDocument ReadXml(ZipArchive zip, string path)
     {
         using var stream = (zip.GetEntry(path) ?? throw new InvalidOperationException("缺少工作簿部件：" + path)).Open();
         return XDocument.Load(stream, LoadOptions.PreserveWhitespace);
-    }
-    private static void ReplaceXml(ZipArchive zip, string path, XDocument xml)
-    {
-        zip.GetEntry(path)?.Delete();
-        using var stream = zip.CreateEntry(path, CompressionLevel.Optimal).Open();
-        using var writer = System.Xml.XmlWriter.Create(stream, new System.Xml.XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = false });
-        xml.Save(writer);
     }
 }

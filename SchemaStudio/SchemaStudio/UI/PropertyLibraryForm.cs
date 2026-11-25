@@ -39,17 +39,16 @@ namespace SchemaStudio.UI
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
             // ── Left: List + Direct "+ 新建属性" / "删除" toolbar ──
-            var leftCard = new Panel { Dock = DockStyle.Fill, BackColor = StudioTheme.Background, Padding = new Padding(1) };
-            leftCard.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawRectangle(p, 0, 0, leftCard.Width - 1, leftCard.Height - 1); };
+            var leftCard = new StudioCard { Dock = DockStyle.Fill, BackColor = StudioTheme.Background, Padding = new Padding(1) };
 
             var leftInner = new Panel { Dock = DockStyle.Fill, BackColor = StudioTheme.Background };
-            var leftBar = new Panel { Dock = DockStyle.Top, Height = 38, BackColor = StudioTheme.Background, Padding = new Padding(8, 4, 6, 4) };
-            leftBar.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawLine(p, 0, leftBar.Height - 1, leftBar.Width, leftBar.Height - 1); };
+            var leftBar = new StudioCard { Dock = DockStyle.Top, BorderAll = false, BorderBottom = true, BackColor = StudioTheme.Background, Padding = new Padding(8, 5, 6, 6) };
 
             var btnNew = StudioTheme.Button("新建属性", (_, _) => AddNewProperty(), icon: StudioIcon.TableAdd, borderless: true);
             btnNew.Dock = DockStyle.Left;
             btnDelete = StudioTheme.IconButton(StudioIcon.Trash, "删除选中属性", (_, _) => DeleteSelected());
             btnDelete.Dock = DockStyle.Right;
+            leftBar.Height = Math.Max(btnNew.GetPreferredSize(Size.Empty).Height, btnDelete.GetPreferredSize(Size.Empty).Height) + 12;
             leftBar.Controls.Add(btnNew);
             leftBar.Controls.Add(btnDelete);
 
@@ -59,12 +58,14 @@ namespace SchemaStudio.UI
                 BorderStyle = BorderStyle.None,
                 IntegralHeight = false,
                 DrawMode = DrawMode.OwnerDrawFixed,
-                ItemHeight = 46,
                 BackColor = StudioTheme.Background,
                 ForeColor = StudioTheme.Text
             };
+            UpdateListMetrics();
             list.DrawItem += DrawListItem;
             list.SelectedIndexChanged += (_, _) => LoadSelected();
+            Load += (_, _) => { UpdateListMetrics(); list.Invalidate(); };
+            DpiChanged += (_, _) => { UpdateListMetrics(); list.Invalidate(); };
 
             leftInner.Controls.Add(list);
             leftInner.Controls.Add(leftBar);
@@ -72,8 +73,7 @@ namespace SchemaStudio.UI
             body.Controls.Add(leftCard, 0, 0);
 
             // ── Right: Live detail editor (auto-syncs to selected item) ──
-            var rightCard = new Panel { Dock = DockStyle.Fill, BackColor = StudioTheme.Surface, Padding = new Padding(20, 14, 20, 14), Margin = new Padding(12, 0, 0, 0) };
-            rightCard.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawRectangle(p, 0, 0, rightCard.Width - 1, rightCard.Height - 1); };
+            var rightCard = new StudioCard { Dock = DockStyle.Fill, BackColor = StudioTheme.Surface, Padding = new Padding(20, 14, 20, 14), Margin = new Padding(12, 0, 0, 0) };
 
             editorGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
             editorGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -143,6 +143,7 @@ namespace SchemaStudio.UI
 
             // ── Footer ──
             var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(14, 10, 14, 12), BackColor = StudioTheme.Background };
+            footer.Resize += (_, _) => footer.Invalidate();
             footer.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawLine(p, 0, 0, footer.Width, 0); };
             var btnOk = StudioTheme.Button("保存属性库", (_, _) => ConfirmAndClose(), primary: true, icon: StudioIcon.Save);
             var btnCancel = StudioTheme.Button("取消", (_, _) => { DialogResult = DialogResult.Cancel; Close(); });
@@ -155,6 +156,17 @@ namespace SchemaStudio.UI
             CancelButton = btnCancel;
 
             RefreshList(working.Properties.FirstOrDefault());
+        }
+
+        private int titleH = 20, subH = 18;
+
+        private void UpdateListMetrics()
+        {
+            using var titleFont = StudioTheme.UiFont(9F, FontStyle.Bold);
+            using var subFont = StudioTheme.UiFont(8.25F);
+            titleH = StudioTheme.LineHeight(titleFont);
+            subH = StudioTheme.LineHeight(subFont);
+            list.ItemHeight = titleH + subH + 18;
         }
 
         private void DrawListItem(object? sender, DrawItemEventArgs e)
@@ -178,11 +190,14 @@ namespace SchemaStudio.UI
             string scopeLabel = d.Scope switch { "table" => "仅表", "both" => "表/列", _ => "仅列" };
             string secondary = $"{(string.IsNullOrWhiteSpace(d.Key) ? "未填 key" : d.Key)}  ·  {d.Kind}  ·  {scopeLabel}";
 
-            TextRenderer.DrawText(g, primary, StudioTheme.UiFont(9F, selected ? FontStyle.Bold : FontStyle.Regular),
-                new Rectangle(e.Bounds.X + 14, e.Bounds.Y + 6, e.Bounds.Width - 28, 18),
+            using var titleFont = StudioTheme.UiFont(9F, selected ? FontStyle.Bold : FontStyle.Regular);
+            using var subFont = StudioTheme.UiFont(8.25F);
+            int top = e.Bounds.Y + Math.Max(4, (e.Bounds.Height - (titleH + subH + 2)) / 2);
+            TextRenderer.DrawText(g, primary, titleFont,
+                new Rectangle(e.Bounds.X + 14, top, e.Bounds.Width - 28, titleH),
                 StudioTheme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-            TextRenderer.DrawText(g, secondary, StudioTheme.UiFont(8F),
-                new Rectangle(e.Bounds.X + 14, e.Bounds.Y + 24, e.Bounds.Width - 28, 16),
+            TextRenderer.DrawText(g, secondary, subFont,
+                new Rectangle(e.Bounds.X + 14, top + titleH + 2, e.Bounds.Width - 28, subH),
                 StudioTheme.Muted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
 

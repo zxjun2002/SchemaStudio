@@ -60,6 +60,69 @@ namespace SchemaStudio.Services
             }
         }
 
+        public static string InferColumnType(EditorSheet sheet, int columnIndex, bool isCsv, int maxRows = 120)
+        {
+            int limit = Math.Min(maxRows, sheet.RowCount);
+            var nonFormulas = new List<EditorCell>();
+            var formulaCached = new List<EditorCell>();
+            for (int row = 1; row <= limit; row++)
+            {
+                var cell = sheet.Cell(row, columnIndex);
+                if (cell.IsFormula)
+                {
+                    if (cell.HasCachedValue && !string.IsNullOrWhiteSpace(cell.Cached) && !IsExcelError(cell.Cached))
+                        formulaCached.Add(cell);
+                }
+                else if (!string.IsNullOrWhiteSpace(cell.Text))
+                {
+                    nonFormulas.Add(cell);
+                }
+            }
+
+            var samples = nonFormulas.Count > 0 ? nonFormulas : formulaCached;
+            if (samples.Count == 0) return "string";
+
+            if (!isCsv && nonFormulas.Count > 0 && nonFormulas.All(c => c.Kind == "boolean"))
+                return "bool";
+
+            var texts = samples.Select(c => (c.IsFormula ? c.Cached : c.Text).Trim()).ToList();
+
+            if (texts.All(t => TryParseIntArray(t, out _, out _)))
+                return "int[]";
+
+            if (texts.All(IsStrictBoolLiteral))
+                return "bool";
+
+            var ic = CultureInfo.InvariantCulture;
+            bool allowNumeric = isCsv
+                ? texts.All(t => !HasLeadingZeroInteger(t))
+                : nonFormulas.Count == 0 || nonFormulas.All(c => c.Kind == "number" || !HasLeadingZeroInteger(c.Text.Trim()));
+
+            if (allowNumeric)
+            {
+                if (texts.All(t => int.TryParse(t, NumberStyles.Integer, ic, out _))) return "int";
+                if (texts.All(t => long.TryParse(t, NumberStyles.Integer, ic, out _))) return "long";
+                if (texts.All(t => double.TryParse(t, NumberStyles.Float, ic, out var d) && double.IsFinite(d))) return "double";
+            }
+
+            return "string";
+        }
+
+        private static bool IsExcelError(string s) => s is "#REF!" or "#VALUE!" or "#DIV/0!" or "#N/A" or "#NAME?" or "#NUM!" or "#NULL!" or "#ERROR";
+
+        private static bool IsStrictBoolLiteral(string s)
+        {
+            s = s.Trim().ToLowerInvariant();
+            return s is "true" or "false" or "yes" or "no" or "是" or "否" or "真" or "假";
+        }
+
+        private static bool HasLeadingZeroInteger(string s)
+        {
+            if (s.Length <= 1) return false;
+            int start = s[0] is '+' or '-' ? 1 : 0;
+            return s.Length - start > 1 && s[start] == '0' && char.IsDigit(s[start + 1]);
+        }
+
         // —— 推荐 —— //
         private static bool TryParseBoolLoose(string s)
         {

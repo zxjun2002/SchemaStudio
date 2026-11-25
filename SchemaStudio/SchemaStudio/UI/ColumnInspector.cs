@@ -108,7 +108,7 @@ internal sealed class ColumnInspector : UserControl
                 if (!rendering && (before != value || !column.IsConfigured))
                 {
                     bool configured = column.IsConfigured;
-                    view.Document.Execute("修改类型", () => { column.ValueType = value; column.IsConfigured = true; }, () => { column.ValueType = before; column.IsConfigured = configured; });
+                    view.Document.Execute($"修改列 {column.ColName} 类型 → {value}", () => { column.ValueType = value; column.IsConfigured = true; }, () => { column.ValueType = before; column.IsConfigured = configured; });
                 }
             };
 
@@ -133,7 +133,7 @@ internal sealed class ColumnInspector : UserControl
             primary.ValueChanged += (_, _) =>
             {
                 int before = column.PkOrder, after = (int)primary.Value;
-                if (!rendering && before != after) view.Document.Execute("修改主键", () => column.PkOrder = after, () => column.PkOrder = before);
+                if (!rendering && before != after) view.Document.Execute($"修改列 {column.ColName} 主键 → {after}", () => column.PkOrder = after, () => column.PkOrder = before);
             };
 
             Divider();
@@ -163,7 +163,7 @@ internal sealed class ColumnInspector : UserControl
                     if (before.Any(p => string.Equals(p.PropertyName, d.Key, StringComparison.OrdinalIgnoreCase) && p.PropertyValue == after)) return;
                     var properties = before.Where(p => !string.Equals(p.PropertyName, d.Key, StringComparison.OrdinalIgnoreCase)).Select(p => new PropertyKV(p.PropertyName ?? "", p.PropertyValue ?? "")).ToList();
                     properties.Add(new(d.Key, after));
-                    view.Document.Execute("修改属性", () => column.ColProperties = properties, () => column.ColProperties = before);
+                    view.Document.Execute($"设置列 {column.ColName} 属性 {d.Key}={after}", () => column.ColProperties = properties, () => column.ColProperties = before);
                 }
                 switch (d.Kind)
                 {
@@ -192,7 +192,7 @@ internal sealed class ColumnInspector : UserControl
                     {
                         var before = column.ColProperties;
                         var after = (before ?? new()).Where(p => !string.Equals(p.PropertyName, d.Key, StringComparison.OrdinalIgnoreCase)).ToList();
-                        view.Document.Execute("取消自定义属性", () => column.ColProperties = after, () => column.ColProperties = before);
+                        view.Document.Execute($"取消列 {column.ColName} 属性 {d.Key}", () => column.ColProperties = after, () => column.ColProperties = before);
                     }
                 };
             }

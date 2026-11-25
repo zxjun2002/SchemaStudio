@@ -31,7 +31,7 @@ public sealed class MainForm : Form
     private readonly Label sidebarPath = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, ForeColor = StudioTheme.Muted, AutoEllipsis = true, Font = StudioTheme.UiFont(8.25F), Padding = new Padding(8, 0, 8, 0) };
     private readonly DataGridView problems = new();
     private readonly Label problemTitle = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(12, 0, 0, 0), Text = "问题  ·  点击“校验”检查当前编辑内容", ForeColor = StudioTheme.Muted, Font = StudioTheme.UiFont(8.75F) };
-    private readonly StudioButton save, undo, redo, moreBtn;
+    private readonly StudioButton save, undo, redo, historyBtn, moreBtn;
     private readonly SplitContainer workspace, editorSplit, bottomSplit;
     private readonly Panel welcome = new() { Dock = DockStyle.Fill, BackColor = StudioTheme.Surface };
     private PropertyRegistry registry = new();
@@ -75,8 +75,12 @@ public sealed class MainForm : Form
 
         undo = StudioTheme.IconButton(StudioIcon.Undo, "撤销 (Ctrl+Z)", (_, _) => Undo(), tips);
         redo = StudioTheme.IconButton(StudioIcon.Redo, "重做 (Ctrl+Y)", (_, _) => Redo(), tips);
+        historyBtn = StudioTheme.Button("历史", (_, _) => ShowHistoryMenu(), borderless: true);
+        historyBtn.ShowDropdown = true;
+        tips.SetToolTip(historyBtn, "查看操作历史并回到任意一步（最多保留 100 条）");
         rightActions.Controls.Add(undo);
         rightActions.Controls.Add(redo);
+        rightActions.Controls.Add(historyBtn);
         rightActions.Controls.Add(MakeDivider());
         rightActions.Controls.Add(StudioTheme.IconButton(StudioIcon.Refresh, "重新加载当前文件", (_, _) => Run(ReloadActive), tips));
         rightActions.Controls.Add(StudioTheme.IconButton(StudioIcon.External, "用系统默认表格程序打开", (_, _) => WithActive(v => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(v.Document.Path) { UseShellExecute = true })), tips));
@@ -166,6 +170,7 @@ public sealed class MainForm : Form
         sideFooter.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawLine(p, 0, 0, sideFooter.Width, 0); };
         sideFooter.Controls.Add(sidebarPath);
 
+        tree.ItemHeight = Math.Max(30, StudioTheme.LineHeight(Font) + 12);
         StudioTheme.EnableDoubleBuffering(tree);
         tree.DrawNode += DrawTreeNode;
         tree.MouseMove += (_, e) =>
@@ -313,6 +318,8 @@ public sealed class MainForm : Form
         active?.BringToFront();
     }
 
+    private string? workspaceNotice;
+
     public void OpenDirectory(string path)
     {
         if (!CloseAll()) return;
@@ -321,6 +328,10 @@ public sealed class MainForm : Form
         registry = loadedRegistry;
         if (!registry.Properties.Any(p => p.Key.Equals("cs_type", StringComparison.OrdinalIgnoreCase)))
             registry.Properties.Add(new PropertyDef { Key = "cs_type", Title = "终端类型", Scope = "both", Kind = "enum", EnumValues = new() { "ALL", "C", "S" }, Default = "ALL" });
+        var (created, updated, _) = DocumentStore.EnsureDirectorySchemas(currentDir);
+        workspaceNotice = created + updated > 0
+            ? $"已自动填充类型快照：新建 {created} 个，补齐 {updated} 个"
+            : null;
         sidebarPath.Text = currentDir;
         tips.SetToolTip(sidebarPath, currentDir);
         BuildTree();
@@ -445,9 +456,15 @@ public sealed class MainForm : Form
         save.Enabled = Active != null;
         undo.Enabled = Active?.Document.CanUndo == true;
         redo.Enabled = Active?.Document.CanRedo == true;
+        historyBtn.Enabled = Active != null;
+        historyBtn.Text = Active != null && Active.Document.HistoryCount > 0
+            ? $"历史 ({Active.Document.HistoryCursor}/{Active.Document.HistoryCount})"
+            : "历史";
         inspector.ShowColumn(Active, registry, forceInspector);
 
-        statusPath.Text = Active == null ? (currentDir ?? "就绪 · 打开配置目录开始编辑") : Active.Document.Path + (Active.Document.IsDirty ? "  ·  未保存" : "  ·  已保存");
+        statusPath.Text = Active == null
+            ? (workspaceNotice != null ? $"{currentDir}  ·  {workspaceNotice}" : (currentDir ?? "就绪 · 打开配置目录开始编辑"))
+            : Active.Document.Path + (Active.Document.IsDirty ? "  ·  未保存" : "  ·  已保存");
         statusDetail.Text = Active == null ? "CSV / XLSX / XLS" : $"{Active.Sheet.RowCount:N0} 行  ·  {Active.Sheet.Columns.Count} 列  ·  {Active.Sheet.Columns.Count(c => ColumnConfiguration.Missing(c, registry) != null)} 列待配置";
         Text = "SchemaStudio" + (Active == null ? "" : " - " + Path.GetFileName(Active.Document.Path) + (Active.Document.IsDirty ? " *" : ""));
     }
@@ -482,19 +499,59 @@ public sealed class MainForm : Form
         if (dialog.ShowDialog(this) == DialogResult.OK && dialog.Result != null) view.Document.AddColumn(view.Sheet, dialog.Result);
     }
 
+    private void ShowHistoryMenu()
+    {
+        if (Active == null) return;
+        var doc = Active.Document;
+        var menu = new ContextMenuStrip { Font = StudioTheme.UiFont(9F), MaximumSize = new Size(380, 440) };
+        var header = new ToolStripMenuItem($"操作历史（当前 {doc.HistoryCursor}/{doc.HistoryCount}，最多 {EditorDocument.MaxHistory} 条）") { Enabled = false };
+        menu.Items.Add(header);
+        menu.Items.Add(new ToolStripSeparator());
+
+        foreach (var entry in doc.GetHistory())
+        {
+            int target = entry.TargetCursor;
+            string time = entry.Timestamp.HasValue ? entry.Timestamp.Value.ToString("HH:mm:ss") + "  " : "";
+            string prefix = entry.IsCurrent ? "" : entry.IsUndone ? "↪ " : "";
+            string suffix = entry.IsCurrent ? "  [当前]" : "";
+            var item = new ToolStripMenuItem($"{prefix}{time}{entry.Label}{suffix}")
+            {
+                Checked = entry.IsCurrent,
+                ForeColor = entry.IsUndone ? StudioTheme.SubtleText : StudioTheme.Text,
+                Font = entry.IsCurrent ? StudioTheme.UiFont(9F, FontStyle.Bold) : StudioTheme.UiFont(9F)
+            };
+            item.Click += (_, _) =>
+            {
+                if (Active != null && CommitActive())
+                {
+                    Active.Document.JumpTo(target);
+                    Active.RefreshModel();
+                    inspector.ShowColumn(Active, registry, true);
+                    RefreshChrome(true);
+                }
+            };
+            menu.Items.Add(item);
+        }
+
+        menu.Closed += (_, _) => { if (!IsDisposed) BeginInvoke(() => { if (!menu.IsDisposed) menu.Dispose(); }); };
+        menu.Show(historyBtn, new Point(0, historyBtn.Height + 2));
+    }
+
     private void ShowMoreMenu()
     {
         var menu = new ContextMenuStrip { Font = StudioTheme.UiFont(9F) };
-        menu.Items.Add("追加行", null, (_, _) => WithActive(v => v.Document.AddRow(v.Sheet))).Enabled = Active != null;
-        menu.Items.Add("追加列", null, (_, _) => WithActive(AddColumn)).Enabled = Active != null;
+        bool csvEditable = Active?.Document.IsCsv == true;
+        menu.Items.Add("追加行（CSV）", null, (_, _) => WithActive(v => v.Document.AddRow(v.Sheet))).Enabled = csvEditable;
+        menu.Items.Add("追加列（CSV）", null, (_, _) => WithActive(AddColumn)).Enabled = csvEditable;
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("删除选中行（CSV）", null, (_, _) => WithActive(v => v.Document.DeleteRow(v.Sheet, v.SelectedDataRow))).Enabled = Active?.Document.IsCsv == true;
-        menu.Items.Add("删除选中列（CSV）", null, (_, _) => WithActive(v => v.Document.DeleteColumn(v.Sheet, v.SelectedColumn))).Enabled = Active?.Document.IsCsv == true;
+        menu.Items.Add("删除选中行（CSV）", null, (_, _) => WithActive(v => v.Document.DeleteRow(v.Sheet, v.SelectedDataRow))).Enabled = csvEditable;
+        menu.Items.Add("删除选中列（CSV）", null, (_, _) => WithActive(v => v.Document.DeleteColumn(v.Sheet, v.SelectedColumn))).Enabled = csvEditable;
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("全部保存 (Ctrl+Shift+S)", null, (_, _) => { if (CommitActive()) foreach (var doc in opened.Values.Where(d => d.IsDirty)) if (!SaveDocument(doc)) break; }).Enabled = opened.Values.Any(d => d.IsDirty);
+        menu.Items.Add("扫描目录补齐类型快照", null, (_, _) => Run(SyncWorkspaceSchemas)).Enabled = currentDir != null;
         menu.Items.Add("外部打开源文件", null, (_, _) => WithActive(v => System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(v.Document.Path) { UseShellExecute = true }))).Enabled = Active != null;
         menu.Items.Add("重新加载当前文件", null, (_, _) => Run(ReloadActive)).Enabled = Active != null;
-        menu.Closed += (_, _) => menu.Dispose();
+        menu.Closed += (_, _) => { if (!IsDisposed) BeginInvoke(() => { if (!menu.IsDisposed) menu.Dispose(); }); };
         menu.Show(moreBtn, new Point(0, moreBtn.Height + 2));
     }
 
@@ -504,7 +561,7 @@ public sealed class MainForm : Form
         var menu = new ContextMenuStrip { Font = StudioTheme.UiFont(9F) };
         menu.Items.Add("删除选中行（CSV）", null, (_, _) => WithActive(v => v.Document.DeleteRow(v.Sheet, v.SelectedDataRow))).Enabled = Active.Document.IsCsv;
         menu.Items.Add("删除选中列（CSV）", null, (_, _) => WithActive(v => v.Document.DeleteColumn(v.Sheet, v.SelectedColumn))).Enabled = Active.Document.IsCsv;
-        menu.Closed += (_, _) => menu.Dispose();
+        menu.Closed += (_, _) => { if (!IsDisposed) BeginInvoke(() => { if (!menu.IsDisposed) menu.Dispose(); }); };
         menu.Show(Cursor.Position);
     }
 
@@ -519,10 +576,13 @@ public sealed class MainForm : Form
 
     private void EditTableProperties(TableEditorControl view)
     {
-        using var dialog = new AssignPropertyForm(registry.Properties.Where(d => d.Scope is "table" or "both").ToList(), view.Sheet.Properties) { Text = "表属性" };
+        string target = view.Document.IsCsv
+            ? Path.GetFileName(view.Document.Path)
+            : $"{Path.GetFileName(view.Document.Path)} / {view.Sheet.Name}";
+        using var dialog = new AssignPropertyForm(registry.Properties.Where(d => d.Scope is "table" or "both").ToList(), view.Sheet.Properties, target, isTableTarget: true);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         var before = view.Sheet.Properties; var after = dialog.Result;
-        view.Document.Execute("修改表属性", () => view.Sheet.Properties = after, () => view.Sheet.Properties = before);
+        view.Document.Execute($"修改表属性 ({target})", () => view.Sheet.Properties = after, () => view.Sheet.Properties = before);
     }
 
     private void EditRegistry()
@@ -617,6 +677,20 @@ public sealed class MainForm : Form
         DocumentStore.Save(document);
         BuildTree();
         OpenFile(path);
+    }
+
+    private void SyncWorkspaceSchemas()
+    {
+        if (currentDir == null) return;
+        var skip = new HashSet<string>(opened.Keys, StringComparer.OrdinalIgnoreCase);
+        var (created, updated, errors) = DocumentStore.EnsureDirectorySchemas(currentDir, skip);
+        workspaceNotice = created + updated > 0 ? $"已自动填充类型快照：新建 {created} 个，补齐 {updated} 个" : "当前目录所有表的类型快照已是最新";
+        BuildTree();
+        RefreshChrome(false);
+        if (errors.Count > 0)
+            MessageBox.Show(this, $"已完成扫描（新建 {created} 个，补齐 {updated} 个），以下文件跳过：\n" + string.Join("\n", errors.Take(10)), "扫描完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        else
+            statusPath.Text = workspaceNotice;
     }
 
     private void ReloadActive()

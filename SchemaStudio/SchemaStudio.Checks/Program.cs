@@ -22,8 +22,8 @@ internal static class Program
         {
             Check("CSV whitespace, text formulas, multiline and encoding round trip", CsvRoundTrip);
             Check("Column metadata survives rename, delete, undo and save", ColumnHistory);
-            Check("XLSX formulas, styles, external links and untouched parts survive edits", XlsxRoundTrip);
-            Check("Formula protection, atomic paste and CSV formula literals", FormulaProtection);
+            Check("XLSX data is read-only while schema metadata remains editable", XlsxReadOnlyAndSchema);
+            Check("Formula protection and CSV literal equals text", FormulaProtection);
             Check("Source and schema conflicts cannot overwrite external changes", ConflictProtection);
             Check("Schema-only saves leave source workbook byte-identical", SchemaOnly);
             Check("Failed schema write restores source and keeps edit history", Rollback);
@@ -31,7 +31,9 @@ internal static class Program
             Check("Validation uses current values and detects composite primary keys", Validation);
             Check("Shared, array, external and merged formula regions stay protected", SpecialRanges);
             Check("Auxiliary and empty sheets cannot corrupt the editable table", MixedSheets);
-            Check("Missing types are explicit; custom properties remain optional", MissingTypes);
+            Check("Unconfigured columns auto-infer types on open; manual add requires type", AutoInferredTypes);
+            Check("Opening workspace directory auto-generates and supplements missing schemas", WorkspaceSchemaSync);
+            Check("History tracks up to 100 steps and supports direct jump to any step", HistoryJumpAndLimit);
             if (args.Contains("--ui")) Check("Desktop layout, virtual grid editing, formula lock and multi-sheet state", Ui);
             Console.WriteLine($"PASS: {passed} checks. Artifacts: {Output}"); return 0;
         }
@@ -132,37 +134,32 @@ internal static class Program
         Assert(json.RootElement.GetProperty("custom_root").GetInt32() == 7, "Unknown root metadata lost.");
         Assert(json.RootElement.GetProperty("columns").EnumerateArray().First(c => c.GetProperty("col_name").GetString() == "cost").GetProperty("custom_column").GetInt32() == 8, "Unknown column metadata lost.");
     }
-    private static void XlsxRoundTrip()
+    private static void XlsxReadOnlyAndSchema()
     {
-        string path = Xlsx("xlsx"); var before = Entries(path); var doc = DocumentStore.Open(path); var sheet = doc.Sheets[0];
-        Assert(doc.HasExternalLinks && sheet.Cell(1, 4).IsFormula, "Formula or external link detection missing.");
-        sheet.Columns[2].ValueType = "string"; // An existing numeric cell must stay numeric regardless of generation metadata.
-        doc.SetCells(sheet, new[] { (1, 2, "777"), (1, 1, "  _x0041_\r\n控制\u0001🙂  ") });
-        doc.AddColumn(sheet, Column("new_field")); doc.AddRow(sheet); doc.SetCells(sheet, new[] { (9, 5, "new value") });
-        DocumentStore.Save(doc); var after = Entries(path); var reopened = DocumentStore.Open(path);
-        foreach (string key in before.Keys.Where(k => k != "xl/worksheets/sheet1.xml" && k != "xl/workbook.xml" && k != "xl/calcChain.xml" && k != "xl/_rels/workbook.xml.rels" && k != "[Content_Types].xml"))
-            Assert(after.TryGetValue(key, out var value) && value.SequenceEqual(before[key]), "Untouched part changed: " + key);
-        Assert(reopened.Sheets[0].Cell(1, 4).Text == "=C2*D2", "Original formula was overwritten.");
-        Assert(reopened.Sheets[1].Cell(1, 0).Text == "=Items!C2", "Cross-sheet formula changed.");
-        Assert(reopened.Sheets[0].Cell(1, 2).Text == "777" && reopened.Sheets[0].Cell(9, 5).Text == "new value", "Edited data missing.");
-        Assert(reopened.Sheets[0].Cell(1, 2).Kind == "number", "A numeric Excel cell became text and could break SUM formulas.");
-        Assert(reopened.Sheets[0].Cell(1, 1).Text == "  _x0041_\r\n控制\u0001🙂  ", "Spreadsheet XML escaping changed literal text or line breaks.");
-        XNamespace ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-        var xmlBefore = XDocument.Parse(Encoding.UTF8.GetString(before["xl/worksheets/sheet1.xml"]));
-        var xmlAfter = XDocument.Parse(Encoding.UTF8.GetString(after["xl/worksheets/sheet1.xml"]));
-        Assert((string?)xmlBefore.Descendants(ns + "c").First(c => (string?)c.Attribute("r") == "C2").Attribute("s") ==
-               (string?)xmlAfter.Descendants(ns + "c").First(c => (string?)c.Attribute("r") == "C2").Attribute("s"), "Cell style lost.");
+        string path = Xlsx("xlsx"); byte[] original = File.ReadAllBytes(path); var doc = DocumentStore.Open(path); var sheet = doc.Sheets[0];
+        Assert(doc.HasExternalLinks && sheet.Cell(1, 4).IsFormula && doc.ReadOnlyReason != null, "Formula, external link, or read-only detection missing.");
+        Assert(sheet.Cell(1, 4).Text == "=C2*D2" && sheet.Cell(1, 4).Display == "240", "Formula expression or cached value missing.");
+        Assert(doc.Sheets[1].Cell(1, 0).Text == "=Items!C2", "Cross-sheet formula missing.");
+        Throws(() => doc.SetCells(sheet, new[] { (1, 2, "777") }), "XLSX cell edit should be rejected.");
+        Throws(() => doc.AddColumn(sheet, Column("new_field")), "XLSX add column should be rejected.");
+        Throws(() => doc.AddRow(sheet), "XLSX add row should be rejected.");
+        Throws(() => doc.RenameColumn(sheet, 1, "title"), "XLSX rename column should be rejected.");
+        doc.Execute("修改列类型", () => sheet.Columns[2].ValueType = "double", () => sheet.Columns[2].ValueType = "int");
+        DocumentStore.Save(doc);
+        Assert(File.ReadAllBytes(path).SequenceEqual(original), "XLSX source workbook was modified.");
+        var reopened = DocumentStore.Open(path);
+        Assert(reopened.Sheets[0].Columns[2].ValueType == "double", "XLSX schema update was not saved.");
     }
     private static void FormulaProtection()
     {
         string path = Xlsx("protected"); var doc = DocumentStore.Open(path); var sheet = doc.Sheets[0];
-        Throws(() => doc.SetCells(sheet, new[] { (1, 1, "changed"), (1, 4, "0") }), "Formula protection did not reject paste.");
+        Throws(() => doc.SetCells(sheet, new[] { (1, 1, "changed"), (1, 4, "0") }), "Protected paste was not rejected.");
         Assert(sheet.Cell(1, 1).Text != "changed" && !doc.IsDirty, "Rejected paste partially applied.");
         Throws(() => doc.SetCells(sheet, new[] { (1, 4, "=SUM(C2:D2)") }), "Formula expressions were editable.");
-        doc.SetCells(sheet, new[] { (1, 1, "=text") });
-        Assert(!sheet.Cell(1, 1).IsFormula, "Text entry created an unprotected formula.");
-        doc.Undo();
-        sheet.ProtectedRanges.Add("C2:D3"); Throws(() => doc.SetCells(sheet, new[] { (2, 2, "8") }), "Protected formula range was editable.");
+        Assert(sheet.ProtectionAt(1, 4) != null, "Formula protection message missing.");
+        string csvPath = Csv("csv-literal"); var csvDoc = DocumentStore.Open(csvPath);
+        csvDoc.SetCells(csvDoc.Sheets[0], new[] { (1, 1, "=text") });
+        Assert(!csvDoc.Sheets[0].Cell(1, 1).IsFormula && csvDoc.Sheets[0].Cell(1, 1).Text == "=text", "CSV text entry created a formula.");
     }
     private static void ConflictProtection()
     {
@@ -220,17 +217,22 @@ internal static class Program
         Console.WriteLine("UI: window opened");
         var view = Descendants(form).OfType<TableEditorControl>().First();
         Assert(view.DataGrid.ColumnCount == 5 && view.DataGrid.RowCount == 8, "Data grid dimensions are wrong.");
-        view.DataGrid.CurrentCell = view.DataGrid[1, 0]; view.DataGrid.BeginEdit(false);
-        ((TextBox)view.DataGrid.EditingControl!).Text = "UI edit"; Assert(view.CommitEdit(), "Grid commit failed."); Application.DoEvents();
-        Assert(view.Sheet.Cell(1, 1).Text == "UI edit", "Virtual grid lost edits.");
-        Console.WriteLine("UI: normal cell committed");
-        view.Document.Undo(); Application.DoEvents();
+        view.DataGrid.CurrentCell = view.DataGrid[1, 0]; Assert(!view.DataGrid.BeginEdit(false), "Excel data should be read-only.");
         view.DataGrid.CurrentCell = view.DataGrid[4, 0]; Assert(!view.DataGrid.BeginEdit(false), "UI formula lock failed.");
         Assert(view.ProtectionMessage?.Contains("公式") == true && Descendants(view).Any(c => c.Name == "protected_help" && c.Visible), "Protected cell lacks a lock explanation button.");
         Assert(view.DataGrid[4, 0].Value?.ToString() == "240", "Grid displayed formula text instead of the saved calculation result.");
-        Console.WriteLine("UI: formula locked with cached result and help");
+        Console.WriteLine("UI: excel read-only and formula cached result verified");
+        string csvPath = Path.Combine(directory, "Items.csv");
+        form.OpenFile(csvPath); Application.DoEvents();
+        var csvView = Descendants(form).OfType<TableEditorControl>().First(v => v.Document.IsCsv);
+        csvView.DataGrid.CurrentCell = csvView.DataGrid[1, 0]; csvView.DataGrid.BeginEdit(false);
+        ((TextBox)csvView.DataGrid.EditingControl!).Text = "UI edit"; Assert(csvView.CommitEdit(), "CSV grid commit failed."); Application.DoEvents();
+        Assert(csvView.Sheet.Cell(1, 1).Text == "UI edit", "CSV virtual grid lost edits.");
+        csvView.Document.JumpTo(0); Application.DoEvents();
+        Assert(!csvView.Document.IsDirty && csvView.Sheet.Cell(1, 1).Text != "UI edit", "History jump did not restore CSV.");
+        Console.WriteLine("UI: csv edit and history jump verified");
         form.OpenFile(path, "Lookup"); Application.DoEvents();
-        Assert(Descendants(form).OfType<TableEditorControl>().All(v => ReferenceEquals(v.Document, view.Document)), "Sheets do not share the same workbook.");
+        Assert(Descendants(form).OfType<TableEditorControl>().Where(v => !v.Document.IsCsv).All(v => ReferenceEquals(v.Document, view.Document)), "Sheets do not share the same workbook.");
         form.OpenFile(path, "Items"); Application.DoEvents();
         view.DataGrid.CurrentCell = view.DataGrid[2, 0]; Application.DoEvents();
         form.Size = new Size(1060, 700); Application.DoEvents();
@@ -244,23 +246,73 @@ internal static class Program
         Console.WriteLine("UI: screenshot saved");
         form.Close();
     }
-    private static void MissingTypes()
+    private static void AutoInferredTypes()
     {
-        string path = Csv("missing-types");
-        File.WriteAllText(path + ".schema.json", "{\"table_name\":\"test\",\"columns\":[{\"col_name\":\"id\",\"value_type\":\"int\"}]}");
+        string path = Path.Combine(Output, "auto-types-" + Guid.NewGuid().ToString("N")[..6] + ".csv");
+        File.WriteAllText(path, "id,code,name,price,rate,enabled,tags\r\n1,001,木剑,100,1.5,true,\"[1,2,3]\"\r\n2,002,盾牌,200,2.25,false,\"[4,5]\"\r\n", new UTF8Encoding(false));
         var registry = new PropertyRegistry { Properties = new() { new() { Key = "cs_type", Title = "终端类型", Scope = "column", Kind = "enum", Default = "ALL", EnumValues = new() { "ALL", "C", "S" } } } };
         var doc = DocumentStore.Open(path); var sheet = doc.Sheets[0];
-        Assert(ColumnConfiguration.Missing(sheet.Columns[0], registry) == null, "Custom properties became mandatory.");
-        Assert(ColumnConfiguration.Missing(sheet.Columns[1], registry) != null, "Externally added column was silently configured.");
+        Assert(sheet.Columns[0].ValueType == "int" && sheet.Columns[0].IsConfigured, "int column was not auto-inferred.");
+        Assert(sheet.Columns[1].ValueType == "string" && sheet.Columns[1].IsConfigured, "Leading-zero code column should stay string.");
+        Assert(sheet.Columns[2].ValueType == "string" && sheet.Columns[2].IsConfigured, "string column was not auto-inferred.");
+        Assert(sheet.Columns[3].ValueType == "int" && sheet.Columns[3].IsConfigured, "price column was not auto-inferred as int.");
+        Assert(sheet.Columns[4].ValueType == "double" && sheet.Columns[4].IsConfigured, "decimal column was not auto-inferred as double.");
+        Assert(sheet.Columns[5].ValueType == "bool" && sheet.Columns[5].IsConfigured, "bool column was not auto-inferred.");
+        Assert(sheet.Columns[6].ValueType == "int[]" && sheet.Columns[6].IsConfigured, "int[] column was not auto-inferred.");
+        Assert(sheet.Columns.All(c => ColumnConfiguration.Missing(c, registry) == null && (c.ColProperties == null || c.ColProperties.Count == 0)), "Auto-inferred columns should be ready without forcing optional custom properties.");
         DocumentStore.Save(doc);
-        Assert(!DocumentStore.Open(path).Sheets[0].Columns[1].IsConfigured, "Saving converted an unconfirmed suggestion into a configured type.");
-        ColumnConfiguration.Confirm(doc, sheet.Columns[1], registry);
-        Assert(ColumnConfiguration.Missing(sheet.Columns[1], registry) == null && sheet.Columns[1].ColProperties?.Count == 0, "Type confirmation filled optional attributes.");
-        doc.Undo(); Assert(!sheet.Columns[1].IsConfigured, "Undo did not restore missing-type warning."); doc.Redo();
-        doc.AddColumn(sheet, Column("optional")); DocumentStore.Save(doc);
         var reopened = DocumentStore.Open(path);
-        Assert(reopened.Sheets[0].Columns[3].IsConfigured && reopened.Sheets[0].Columns[3].ColProperties?.Count == 0, "A typed column without attributes could not be saved.");
+        Assert(reopened.Sheets[0].Columns.Count == 7 && reopened.Sheets[0].Columns.All(c => c.HasStoredDefinition && c.IsConfigured), "Saving did not persist all auto-inferred column types.");
+        doc.AddColumn(sheet, Column("optional")); DocumentStore.Save(doc);
+        var afterAdd = DocumentStore.Open(path);
+        Assert(afterAdd.Sheets[0].Columns[7].IsConfigured && afterAdd.Sheets[0].Columns[7].ColProperties?.Count == 0, "A typed column without attributes could not be saved.");
         Throws(() => doc.AddColumn(sheet, new ColumnSchema { ColName = "unconfigured" }), "New column accepted without type confirmation.");
+    }
+    private static void WorkspaceSchemaSync()
+    {
+        string dir = Path.Combine(Output, "ws-sync-" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(dir);
+        string csvPath = Path.Combine(dir, "Heroes.csv");
+        File.WriteAllText(csvPath, "id,name,hp,is_boss\r\n101,亚瑟,1500,false\r\n102,魔王,9999,true\r\n", new UTF8Encoding(false));
+        byte[] csvBytes = File.ReadAllBytes(csvPath);
+        string partialPath = Path.Combine(dir, "Partial.csv");
+        File.WriteAllText(partialPath, "id,title,score\r\n1,一,9.5\r\n2,二,8.2\r\n", new UTF8Encoding(false));
+        File.WriteAllText(partialPath + ".schema.json", "{\"table_name\":\"Partial.csv\",\"columns\":[{\"col_name\":\"id\",\"value_type\":\"long\",\"col_properties\":[{\"property_name\":\"cs_type\",\"property_value\":\"S\"}]}]}");
+        string badCsv = Path.Combine(dir, "Broken.csv");
+        File.WriteAllText(badCsv, ",dup,dup\r\n1,2,3\r\n", new UTF8Encoding(false));
+
+        var first = DocumentStore.EnsureDirectorySchemas(dir);
+        Assert(first.Created == 1 && first.Updated == 1 && first.Errors.Count == 0, $"Unexpected first sync counts: created={first.Created}, updated={first.Updated}, errors={first.Errors.Count}");
+        Assert(File.ReadAllBytes(csvPath).SequenceEqual(csvBytes), "Workspace schema sync modified source CSV.");
+        Assert(File.Exists(csvPath + ".schema.json") && !File.Exists(badCsv + ".schema.json"), "Schema file creation mismatch.");
+        var heroes = DocumentStore.Open(csvPath).Sheets[0];
+        Assert(heroes.Columns[0].ValueType == "int" && heroes.Columns[1].ValueType == "string" && heroes.Columns[2].ValueType == "int" && heroes.Columns[3].ValueType == "bool", "Heroes auto-inferred types mismatch.");
+        var partial = DocumentStore.Open(partialPath).Sheets[0];
+        Assert(partial.Columns[0].ValueType == "long" && partial.Columns[0].ColProperties![0].PropertyValue == "S", "Existing column definition was overwritten during sync.");
+        Assert(partial.Columns[1].ValueType == "string" && partial.Columns[2].ValueType == "double", "Newly added columns were not supplemented.");
+        var second = DocumentStore.EnsureDirectorySchemas(dir);
+        Assert(second.Created == 0 && second.Updated == 0, "Workspace schema sync was not idempotent.");
+    }
+    private static void HistoryJumpAndLimit()
+    {
+        var doc = DocumentStore.Open(Csv("history"));
+        var sheet = doc.Sheets[0];
+        string original = sheet.Cell(1, 1).Text;
+        for (int i = 1; i <= 5; i++) doc.SetCells(sheet, new[] { (1, 1, $"v{i}") });
+        Assert(doc.HistoryCount == 5 && doc.HistoryCursor == 5 && doc.GetHistory().Count == 6, "History count mismatch.");
+        doc.JumpTo(2);
+        Assert(sheet.Cell(1, 1).Text == "v2" && doc.HistoryCursor == 2 && doc.CanUndo && doc.CanRedo, "Jump backward failed.");
+        doc.JumpTo(4);
+        Assert(sheet.Cell(1, 1).Text == "v4" && doc.HistoryCursor == 4, "Jump forward failed.");
+        doc.JumpTo(0);
+        Assert(sheet.Cell(1, 1).Text == original && !doc.IsDirty && !doc.CanUndo && doc.CanRedo, "Jump to initial state failed.");
+        doc.JumpTo(2);
+        doc.SetCells(sheet, new[] { (1, 1, "branch") });
+        Assert(doc.HistoryCount == 3 && doc.HistoryCursor == 3 && !doc.CanRedo && sheet.Cell(1, 1).Text == "branch", "Branching after jump did not trim redo tail.");
+        for (int i = 1; i <= 120; i++) doc.SetCells(sheet, new[] { (1, 1, $"step-{i}") });
+        Assert(doc.HistoryCount == EditorDocument.MaxHistory && doc.HistoryCursor == EditorDocument.MaxHistory && doc.HistoryTrimmed, "History did not cap at 100 entries.");
+        doc.JumpTo(0);
+        Assert(sheet.Cell(1, 1).Text == "step-20" && doc.HistoryCursor == 0, "Jump to earliest retained state after 100-entry trim failed.");
     }
     private static void SpecialRanges()
     {
@@ -278,31 +330,32 @@ internal static class Program
             xml.Root!.Add(new XElement(ns + "mergeCells", new XElement(ns + "mergeCell", new XAttribute("ref", "A7:B7"))));
             entry.Delete(); using var output = zip.CreateEntry("xl/worksheets/sheet1.xml").Open(); xml.Save(output);
         }
+        byte[] original = File.ReadAllBytes(path);
         var doc = DocumentStore.Open(path); var sheet = doc.Sheets[0];
         foreach (var p in new[] { (1, 4), (2, 4), (3, 4), (4, 4), (5, 4), (6, 1) })
+        {
+            Assert(sheet.ProtectionAt(p.Item1, p.Item2) != null, "Special formula or merged cell lost protection metadata.");
             Throws(() => doc.SetCells(sheet, new[] { (p.Item1, p.Item2, "0") }), "Special formula or merged cell was editable.");
-        doc.SetCells(sheet, new[] { (1, 2, "900") }); DocumentStore.Save(doc);
-        Assert(DocumentStore.Open(path).Sheets[0].Cell(1, 4).Text == "=C2*D2", "Array formula was lost when editing an ordinary cell.");
+        }
+        DocumentStore.Save(doc);
+        Assert(File.ReadAllBytes(path).SequenceEqual(original) && DocumentStore.Open(path).Sheets[0].Cell(1, 4).Text == "=C2*D2", "Array formula workbook was altered.");
     }
     private static void MixedSheets()
     {
-        string path = Path.Combine(Output, "mixed.xlsx");
+        string path = Path.Combine(Output, "mixed-" + Guid.NewGuid().ToString("N")[..6] + ".xlsx");
         using (var workbook = new XSSFWorkbook())
         {
             var good = workbook.CreateSheet("Config"); good.CreateRow(0).CreateCell(0).SetCellValue("id"); good.CreateRow(1).CreateCell(0).SetCellValue(1);
             var auxiliary = workbook.CreateSheet("Auxiliary"); auxiliary.CreateRow(1).CreateCell(0).SetCellValue("not a config header");
             workbook.CreateSheet("Empty"); using var output = File.Create(path); workbook.Write(output);
         }
+        byte[] original = File.ReadAllBytes(path);
         var doc = DocumentStore.Open(path);
         Assert(doc.Sheets.Count == 3 && doc.Sheets[1].SchemaIssue != null, "Auxiliary sheet blocked the workbook or was treated as a valid config.");
-        doc.SetCells(doc.Sheets[0], new[] { (1, 0, "2") });
-        ColumnConfiguration.Confirm(doc, doc.Sheets[0].Columns[0], new PropertyRegistry());
-        doc.AddColumn(doc.Sheets[2], Column("id")); doc.AddRow(doc.Sheets[2]); doc.SetCells(doc.Sheets[2], new[] { (1, 0, "3") });
         DocumentStore.Save(doc);
-        var reopened = DocumentStore.Open(path);
-        Assert(reopened.Sheets[2].Cell(1, 0).Text == "3", "Could not edit an empty worksheet.");
+        Assert(File.ReadAllBytes(path).SequenceEqual(original), "Mixed workbook was altered during schema save.");
         using var json = JsonDocument.Parse(File.ReadAllText(path + ".schema.json"));
-        Assert(json.RootElement.GetProperty("sheets").GetArrayLength() == 2, "Auxiliary sheet emitted invalid schema.");
+        Assert(json.RootElement.GetProperty("sheets").GetArrayLength() == 1, "Auxiliary or empty sheet emitted invalid schema.");
     }
     private static IEnumerable<Control> Descendants(Control root)
     {

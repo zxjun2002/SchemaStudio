@@ -115,7 +115,8 @@ namespace SchemaStudio.UI
                     gridCols.Rows[e.RowIndex].DataBoundItem is NewColRow row)
                 {
                     var defs = registry.Properties.Where(d => d.Scope == "column" || d.Scope == "both").ToList();
-                    using var dlg = new AssignPropertyForm(defs, row.ColProperties ?? new List<PropertyKV>());
+                    string colTarget = ResultFormat == "csv" ? row.ColName : $"{CurrentSheet} / {row.ColName}";
+                    using var dlg = new AssignPropertyForm(defs, row.ColProperties ?? new List<PropertyKV>(), colTarget, isTableTarget: false);
                     if (dlg.ShowDialog(this) == DialogResult.OK)
                     {
                         row.ColProperties = dlg.Result;
@@ -146,7 +147,9 @@ namespace SchemaStudio.UI
                 var defs = registry.Properties.Where(d => d.Scope == "table" || d.Scope == "both").ToList();
                 var key = CurrentSheet;
                 if (!sheetTableProps.TryGetValue(key, out var list)) sheetTableProps[key] = list = new List<PropertyKV>();
-                using var dlg = new AssignPropertyForm(defs, list) { Text = "表属性" };
+                string fileLabel = (txtName.Text ?? "").Trim() is { Length: > 0 } n ? $"{n}.{ResultFormat}" : $"未命名.{ResultFormat}";
+                string tableTarget = ResultFormat == "csv" ? fileLabel : $"{fileLabel} / {key}";
+                using var dlg = new AssignPropertyForm(defs, list, tableTarget, isTableTarget: true);
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
                     sheetTableProps[key] = dlg.Result ?? new List<PropertyKV>();

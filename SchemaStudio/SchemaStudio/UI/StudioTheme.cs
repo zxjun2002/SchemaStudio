@@ -92,8 +92,13 @@ internal static class StudioTheme
         return button;
     }
 
+    public static int LineHeight(Font font) => TextRenderer.MeasureText("测Ag", font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix).Height;
+
     public static void Grid(DataGridView grid)
     {
+        var headerFont = UiFont(9F, FontStyle.Regular);
+        var cellFont = UiFont(9F);
+        int lineH = LineHeight(cellFont);
         grid.BackgroundColor = Surface;
         grid.BorderStyle = BorderStyle.None;
         grid.GridColor = Color.FromArgb(235, 238, 243);
@@ -106,11 +111,11 @@ internal static class StudioTheme
             ForeColor = Text,
             SelectionBackColor = SubtleSurface,
             SelectionForeColor = Text,
-            Font = UiFont(9F, FontStyle.Regular),
+            Font = headerFont,
             Padding = new Padding(10, 0, 6, 0),
             Alignment = DataGridViewContentAlignment.MiddleLeft
         };
-        grid.ColumnHeadersHeight = 36;
+        grid.ColumnHeadersHeight = Math.Max(36, lineH + 16);
         grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing;
         grid.RowHeadersDefaultCellStyle = new DataGridViewCellStyle
         {
@@ -120,17 +125,17 @@ internal static class StudioTheme
             SelectionForeColor = Accent,
             Font = UiFont(8.5F)
         };
-        grid.RowHeadersWidth = 52;
+        grid.RowHeadersWidth = Math.Max(52, lineH * 2 + 16);
         grid.DefaultCellStyle = new DataGridViewCellStyle
         {
             ForeColor = Text,
             BackColor = Surface,
             SelectionBackColor = Selection,
             SelectionForeColor = Text,
-            Font = UiFont(9F),
+            Font = cellFont,
             Padding = new Padding(10, 0, 6, 0)
         };
-        grid.RowTemplate.Height = 30;
+        grid.RowTemplate.Height = Math.Max(30, lineH + 12);
         grid.CellBorderStyle = DataGridViewCellBorderStyle.Single;
         grid.AllowUserToAddRows = false;
         grid.AllowUserToDeleteRows = false;
@@ -328,6 +333,30 @@ internal static class StudioTheme
 }
 
 internal enum StudioButtonVariant { Ghost, Secondary, Primary }
+
+internal sealed class StudioCard : Panel
+{
+    public bool BorderTop { get; set; }
+    public bool BorderBottom { get; set; }
+    public bool BorderAll { get; set; } = true;
+
+    public StudioCard()
+    {
+        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        using var pen = new Pen(StudioTheme.Border, 1f);
+        if (BorderAll) e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+        else
+        {
+            if (BorderTop) e.Graphics.DrawLine(pen, 0, 0, Width, 0);
+            if (BorderBottom) e.Graphics.DrawLine(pen, 0, Height - 1, Width, Height - 1);
+        }
+    }
+}
 
 internal sealed class StudioButton : Control, IButtonControl
 {

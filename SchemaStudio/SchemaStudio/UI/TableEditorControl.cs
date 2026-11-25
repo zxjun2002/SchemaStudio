@@ -77,9 +77,12 @@ public sealed class TableEditorControl : UserControl
         viewSwitch.Margin = new Padding(6, 1, 0, 0);
         viewSwitch.SelectedIndexChanged += (_, _) => SwitchMode();
 
-        rightTools.Controls.Add(addRowBtn);
-        rightTools.Controls.Add(addColBtn);
-        if (Document.IsCsv) rightTools.Controls.Add(delBtn);
+        if (Document.IsCsv)
+        {
+            rightTools.Controls.Add(addRowBtn);
+            rightTools.Controls.Add(addColBtn);
+            rightTools.Controls.Add(delBtn);
+        }
         rightTools.Controls.Add(viewSwitch);
 
         contextLayout.Controls.Add(crumb, 0, 0);
@@ -176,7 +179,7 @@ public sealed class TableEditorControl : UserControl
                 e.CellStyle!.BackColor = StudioTheme.DangerBg;
                 e.CellStyle.ForeColor = StudioTheme.DangerText;
             }
-            if (Document.ReadOnlyReason != null || Sheet.ProtectionAt(e.RowIndex + 1, e.ColumnIndex) != null)
+            if (Sheet.ProtectionAt(e.RowIndex + 1, e.ColumnIndex) != null)
             {
                 e.CellStyle!.Padding = new Padding(10, 0, 26, 0);
                 e.CellStyle.BackColor = StudioTheme.FormulaBg;
@@ -184,7 +187,7 @@ public sealed class TableEditorControl : UserControl
         };
         DataGrid.CellPainting += (_, e) =>
         {
-            if (e.RowIndex < 0 || e.ColumnIndex < 0 || Document.ReadOnlyReason == null && Sheet.ProtectionAt(e.RowIndex + 1, e.ColumnIndex) == null) return;
+            if (e.RowIndex < 0 || e.ColumnIndex < 0 || Sheet.ProtectionAt(e.RowIndex + 1, e.ColumnIndex) == null) return;
             e.Paint(e.ClipBounds, DataGridViewPaintParts.All);
             e.Graphics!.SmoothingMode = SmoothingMode.AntiAlias;
             var circle = new Rectangle(e.CellBounds.Right - 20, e.CellBounds.Top + (e.CellBounds.Height - 14) / 2, 14, 14);
@@ -197,7 +200,7 @@ public sealed class TableEditorControl : UserControl
         DataGrid.CellMouseClick += (_, e) =>
         {
             if (e.RowIndex >= 0 && e.ColumnIndex >= 0 && e.X >= DataGrid.Columns[e.ColumnIndex].Width - 24 &&
-                (Document.ReadOnlyReason != null || Sheet.ProtectionAt(e.RowIndex + 1, e.ColumnIndex) != null)) ShowProtection();
+                Sheet.ProtectionAt(e.RowIndex + 1, e.ColumnIndex) != null) ShowProtection();
         };
         DataGrid.CellToolTipTextNeeded += (_, e) =>
         {
@@ -255,10 +258,10 @@ public sealed class TableEditorControl : UserControl
                 else if (e.ColumnIndex == 1 && (c.ValueType != value || !c.IsConfigured))
                 {
                     string? before = c.ValueType; bool configured = c.IsConfigured;
-                    Document.Execute("修改类型", () => { c.ValueType = value; c.IsConfigured = true; }, () => { c.ValueType = before; c.IsConfigured = configured; });
+                    Document.Execute($"修改列 {c.ColName} 类型 → {value}", () => { c.ValueType = value; c.IsConfigured = true; }, () => { c.ValueType = before; c.IsConfigured = configured; });
                 }
                 else if (e.ColumnIndex == 2 && int.TryParse(value, out int order) && c.PkOrder != order)
-                { int before = c.PkOrder; Document.Execute("修改主键", () => c.PkOrder = order, () => c.PkOrder = before); }
+                { int before = c.PkOrder; Document.Execute($"修改列 {c.ColName} 主键 → {order}", () => c.PkOrder = order, () => c.PkOrder = before); }
             });
         };
         structure.CurrentCellChanged += (_, _) => { if (!refreshing) ColumnSelected?.Invoke(this, EventArgs.Empty); };
@@ -330,10 +333,11 @@ public sealed class TableEditorControl : UserControl
         var cell = Sheet.Cell(current.RowIndex + 1, current.ColumnIndex);
         address.Text = EditorSheet.Address(current.RowIndex + 1, current.ColumnIndex);
         formula.Text = cell.Text;
-        ProtectionMessage = Document.ReadOnlyReason ?? Sheet.ProtectionAt(current.RowIndex + 1, current.ColumnIndex);
+        string? cellProtection = Sheet.ProtectionAt(current.RowIndex + 1, current.ColumnIndex);
+        ProtectionMessage = cellProtection ?? Document.ReadOnlyReason;
         formula.ReadOnly = true;
-        lockState.Text = ProtectionMessage != null ? "已锁定" : "可编辑";
-        lockState.ForeColor = ProtectionMessage != null ? StudioTheme.WarningText : StudioTheme.Muted;
+        lockState.Text = cellProtection != null ? "已锁定" : Document.ReadOnlyReason != null ? "Excel 只读" : "可编辑";
+        lockState.ForeColor = cellProtection != null ? StudioTheme.WarningText : StudioTheme.Muted;
         protectionHelp.Visible = ProtectionMessage != null;
         formula.ForeColor = cell.IsFormula ? StudioTheme.Accent : StudioTheme.Text;
     }
