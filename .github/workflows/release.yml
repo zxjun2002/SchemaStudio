@@ -1,21 +1,33 @@
-name: Release
+name: Release SchemaStudio
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（例如 v1.0.0；留空则使用 dev-<sha>）'
+        description: '发布的版本号（例如 1.0.0 或 1.0.0-beta.1，可带或不带 v 前缀）'
+        required: true
+        type: string
+      dry_run:
+        description: '仅测试构建与打包，不发布到 GitHub Release'
         required: false
-        default: ''
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
+env:
+  SOLUTION: SchemaStudio/SchemaStudio.sln
+  APP_PROJECT: SchemaStudio/SchemaStudio/SchemaStudio.csproj
+  CHECKS_PROJECT: SchemaStudio/SchemaStudio.Checks/SchemaStudio.Checks.csproj
+  DOTNET_VERSION: '8.0.x'
+  ARTIFACTS_DIR: ./artifacts
+
 jobs:
-  build-and-release:
+  build-and-publish:
     runs-on: windows-latest
     defaults:
       run:
@@ -25,117 +37,152 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
+      - name: Resolve and validate version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $raw = $env:INPUT_VERSION.Trim()
+          } else {
+            $raw = $env:GITHUB_REF_NAME.Trim()
+          }
+
+          $version = $raw -replace '^[vV]', ''
+          if ($version -notmatch '^(\d+\.\d+\.\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$') {
+            Write-Host "::error::非法版本号 '$raw'，请使用语义化版本，例如 v1.0.0 或 v1.0.0-beta.1"
+            exit 1
+          }
+
+          $fileVersion = "$($Matches[1]).0"
+          $tag = if ($raw -match '^[vV]') { $raw } else { "v$version" }
+          $isPrerelease = if ($version -match '-') { 'true' } else { 'false' }
+
+          Write-Host "Resolved tag=$tag version=$version fileVersion=$fileVersion prerelease=$isPrerelease"
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "file_version=$fileVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "is_prerelease=$isPrerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Resolve version
-        id: meta
-        run: |
-          $isTag = $env:GITHUB_REF_TYPE -eq 'tag'
-          if ($isTag) {
-            $tag = $env:GITHUB_REF_NAME
-          } elseif (-not [string]::IsNullOrWhiteSpace('${{ inputs.version }}')) {
-            $tag = '${{ inputs.version }}'.Trim()
-          } else {
-            $shortSha = $env:GITHUB_SHA.Substring(0, 7)
-            $tag = "dev-$shortSha"
-          }
-
-          $clean = $tag.TrimStart('v', 'V')
-          if ($clean -match '^(\d+\.\d+\.\d+)') {
-            $fileVersion = "$($Matches[1]).0"
-            $packageVersion = $clean
-          } else {
-            $fileVersion = '0.0.0.0'
-            $packageVersion = '0.0.0-dev'
-          }
-          $isPrerelease = ($clean -match '-') -or (-not $isTag)
-
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "package_version=$packageVersion" >> $env:GITHUB_OUTPUT
-          "file_version=$fileVersion" >> $env:GITHUB_OUTPUT
-          "is_tag=$($isTag.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-          "is_prerelease=$($isPrerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-
-      - name: Restore dependencies
-        run: dotnet restore SchemaStudio/SchemaStudio.sln
+      - name: Restore solution
+        run: dotnet restore "${{ env.SOLUTION }}"
 
       - name: Run checks
-        run: dotnet run --project SchemaStudio/SchemaStudio.Checks/SchemaStudio.Checks.csproj -c Release
+        run: dotnet run --project "${{ env.CHECKS_PROJECT }}" --configuration Release
 
       - name: Publish standalone win-x64 EXE (no .NET runtime required)
         run: |
-          dotnet publish SchemaStudio/SchemaStudio/SchemaStudio.csproj `
-            -c Release `
-            -r win-x64 `
+          dotnet publish "${{ env.APP_PROJECT }}" `
+            --configuration Release `
+            --runtime win-x64 `
             --self-contained true `
             -p:PublishSingleFile=true `
             -p:IncludeNativeLibrariesForSelfExtract=true `
             -p:EnableCompressionInSingleFile=true `
             -p:DebugType=none `
             -p:DebugSymbols=false `
-            -p:Version=${{ steps.meta.outputs.package_version }} `
-            -p:AssemblyVersion=${{ steps.meta.outputs.file_version }} `
-            -p:FileVersion=${{ steps.meta.outputs.file_version }} `
-            -p:InformationalVersion=${{ steps.meta.outputs.tag }} `
-            -o dist/standalone
+            -p:Version="${{ steps.version.outputs.version }}" `
+            -p:AssemblyVersion="${{ steps.version.outputs.file_version }}" `
+            -p:FileVersion="${{ steps.version.outputs.file_version }}" `
+            -p:InformationalVersion="${{ steps.version.outputs.tag }}" `
+            --output "${{ env.ARTIFACTS_DIR }}/publish-standalone"
 
       - name: Publish lightweight win-x64 EXE (requires .NET 8 Desktop Runtime)
         run: |
-          dotnet publish SchemaStudio/SchemaStudio/SchemaStudio.csproj `
-            -c Release `
-            -r win-x64 `
+          dotnet publish "${{ env.APP_PROJECT }}" `
+            --configuration Release `
+            --runtime win-x64 `
             --self-contained false `
             -p:PublishSingleFile=true `
             -p:DebugType=none `
             -p:DebugSymbols=false `
-            -p:Version=${{ steps.meta.outputs.package_version }} `
-            -p:AssemblyVersion=${{ steps.meta.outputs.file_version }} `
-            -p:FileVersion=${{ steps.meta.outputs.file_version }} `
-            -p:InformationalVersion=${{ steps.meta.outputs.tag }} `
-            -o dist/lightweight
+            -p:Version="${{ steps.version.outputs.version }}" `
+            -p:AssemblyVersion="${{ steps.version.outputs.file_version }}" `
+            -p:FileVersion="${{ steps.version.outputs.file_version }}" `
+            -p:InformationalVersion="${{ steps.version.outputs.tag }}" `
+            --output "${{ env.ARTIFACTS_DIR }}/publish-lightweight"
 
-      - name: Package release archives & checksums
+      - name: Assemble release archives & checksums
         run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          New-Item -ItemType Directory -Force -Path dist/release | Out-Null
+          $tag = '${{ steps.version.outputs.tag }}'
+          $releaseDir = "${{ env.ARTIFACTS_DIR }}/release"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
-          Copy-Item README.md dist/standalone/README.md
-          Copy-Item README.md dist/lightweight/README.md
+          Copy-Item README.md "${{ env.ARTIFACTS_DIR }}/publish-standalone/README.md"
+          Copy-Item LICENSE "${{ env.ARTIFACTS_DIR }}/publish-standalone/LICENSE"
+          Copy-Item README.md "${{ env.ARTIFACTS_DIR }}/publish-lightweight/README.md"
+          Copy-Item LICENSE "${{ env.ARTIFACTS_DIR }}/publish-lightweight/LICENSE"
 
-          $standaloneZip = "dist/release/SchemaStudio-$tag-win-x64-standalone.zip"
-          $lightZip = "dist/release/SchemaStudio-$tag-win-x64.zip"
+          $standaloneZip = "$releaseDir/SchemaStudio-$tag-win-x64-standalone.zip"
+          $lightZip = "$releaseDir/SchemaStudio-$tag-win-x64.zip"
 
-          Compress-Archive -Path dist/standalone/* -DestinationPath $standaloneZip -Force
-          Compress-Archive -Path dist/lightweight/* -DestinationPath $lightZip -Force
+          Compress-Archive -Path "${{ env.ARTIFACTS_DIR }}/publish-standalone/*" -DestinationPath $standaloneZip -Force
+          Compress-Archive -Path "${{ env.ARTIFACTS_DIR }}/publish-lightweight/*" -DestinationPath $lightZip -Force
 
-          $hashes = Get-ChildItem dist/release/*.zip | Sort-Object Name | ForEach-Object {
+          $hashes = Get-ChildItem "$releaseDir/*.zip" | Sort-Object Name | ForEach-Object {
             $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
             "$h  $($_.Name)"
           }
-          Set-Content -Path dist/release/SHA256SUMS.txt -Value $hashes -Encoding UTF8
+          Set-Content -Path "$releaseDir/SHA256SUMS.txt" -Value $hashes -Encoding UTF8
+
+          Write-Host "=== Release assets ==="
+          Get-ChildItem $releaseDir | Format-Table Name, Length -AutoSize
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: SchemaStudio-${{ steps.meta.outputs.tag }}
-          path: dist/release/*
-          retention-days: 30
+          name: release-artifacts-${{ steps.version.outputs.version }}
+          path: ${{ env.ARTIFACTS_DIR }}/release/*
 
-      - name: Create GitHub Release
-        if: steps.meta.outputs.is_tag == 'true'
+      - name: Create or update GitHub Release
+        if: ${{ inputs.dry_run != true }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $tag = '${{ steps.meta.outputs.tag }}'
-          $files = @(Get-ChildItem dist/release/* | ForEach-Object { $_.FullName })
-          $ghArgs = @('release', 'create', $tag) + $files + @(
-            '--title', "SchemaStudio $tag",
-            '--generate-notes'
-          )
-          if ('${{ steps.meta.outputs.is_prerelease }}' -eq 'true') {
-            $ghArgs += '--prerelease'
+          $tag = '${{ steps.version.outputs.tag }}'
+          $version = '${{ steps.version.outputs.version }}'
+          $releaseDir = "${{ env.ARTIFACTS_DIR }}/release"
+          $notesFile = "${{ env.ARTIFACTS_DIR }}/release-notes.md"
+
+          $notes = @(
+            '### 下载与使用'
+            ''
+            '#### 1. 独立单文件版（推荐，免安装 .NET 运行时）'
+            "下载下方 ``SchemaStudio-$tag-win-x64-standalone.zip``，解压后直接双击 ``SchemaStudio.exe`` 运行。"
+            ''
+            '#### 2. 轻量版（需本机已安装 .NET 8 Desktop Runtime）'
+            "下载下方 ``SchemaStudio-$tag-win-x64.zip``，体积更小，解压后运行 ``SchemaStudio.exe``。"
+            ''
+            '#### 3. 校验文件'
+            '`SHA256SUMS.txt` 包含上述压缩包的 SHA-256 校验值。'
+            ''
+            '---'
+            "Version: ``$version``"
+          ) -join "`n"
+          Set-Content -Path $notesFile -Value $notes -Encoding UTF8
+
+          $assets = @(Get-ChildItem $releaseDir | ForEach-Object { $_.FullName })
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag --title "$tag" --notes-file $notesFile
+            gh release upload $tag @assets --clobber
+          } else {
+            $ghArgs = @('release', 'create', $tag) + $assets + @(
+              '--title', $tag,
+              '--notes-file', $notesFile,
+              '--generate-notes'
+            )
+            if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+              $ghArgs += @('--target', $env:GITHUB_SHA)
+            }
+            if ('${{ steps.version.outputs.is_prerelease }}' -eq 'true') {
+              $ghArgs += '--prerelease'
+            }
+            gh @ghArgs
           }
-          gh @ghArgs
