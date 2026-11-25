@@ -125,7 +125,8 @@ namespace SchemaStudio.Services
         public static IEnumerable<string> GetAllDirs(string root)
         {
             yield return root;
-            foreach (var d in Directory.GetDirectories(root))
+            foreach (var d in Directory.GetDirectories(root)
+                .Where(d => !Path.GetFileName(d).StartsWith('.') && (File.GetAttributes(d) & FileAttributes.ReparsePoint) == 0))
                 foreach (var x in GetAllDirs(d)) yield return x;
         }
 

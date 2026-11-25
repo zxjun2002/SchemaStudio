@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "properties": [
+    { "key": "cs_type", "title": "终端类型", "scope": "both", "kind": "enum", "values": ["ALL", "C", "S"], "default": "ALL" },
+    { "key": "localization", "title": "多语言", "scope": "column", "kind": "bool", "default": "false" },
+    { "key": "comment", "title": "备注", "scope": "both", "kind": "string", "default": "" }
+  ]
+}

@@ -1,2 +1,6 @@
 ﻿SchemaStudio/SchemaStudio/bin
 SchemaStudio/SchemaStudio/obj
+**/bin/
+**/obj/
+**/.schemastudio-backups/
+artifacts/

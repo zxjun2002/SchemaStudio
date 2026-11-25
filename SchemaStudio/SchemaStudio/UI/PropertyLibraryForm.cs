@@ -1,3 +1,4 @@
+using System.Drawing.Drawing2D;
 using System.Text.Json;
 using SchemaStudio.Models;
 using SchemaStudio.Services;
@@ -8,100 +9,308 @@ namespace SchemaStudio.UI
     {
         private readonly ListBox list;
         private readonly TextBox txtKey, txtTitle, txtEnum, txtDefault;
-        private readonly Button btnAdd, btnDel, btnSave, btnOk, btnCancel;
-        private PropertyRegistry working;
+        private readonly ComboBox cmbKind, cmbScope;
+        private readonly Label lblEnum, lblEnumHint, lblEmpty;
+        private readonly TableLayoutPanel editorGrid;
+        private readonly StudioButton btnDelete;
+        private readonly PropertyRegistry working;
+        private bool loading;
+
         public PropertyRegistry Result => working;
 
         public PropertyLibraryForm(PropertyRegistry reg)
         {
-            Text = "自定义属性库"; Width = 680; Height = 480;
-            // 用 System.Text.Json 做深拷贝，保持与全局 JsonOptions 一致
+            Text = "自定义属性库";
+            ClientSize = new Size(780, 500);
+            MinimumSize = new Size(640, 420);
+            StartPosition = FormStartPosition.CenterParent;
+            Font = StudioTheme.UiFont(9F);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            BackColor = StudioTheme.Surface;
+            ForeColor = StudioTheme.Text;
+            HandleCreated += (_, _) => StudioTheme.ApplyModernTitleBar(this);
+
             working = JsonSerializer.Deserialize<PropertyRegistry>(
                           JsonSerializer.Serialize(reg, DataIO.JsonOptions),
                           DataIO.JsonOptions) ?? new PropertyRegistry();
 
-            list = new ListBox { Left = 10, Top = 10, Width = 240, Height = 380 };
-            list.SelectedIndexChanged += (_, __) => LoadSelected();
-            Controls.Add(list);
+            var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(14) };
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-            int L = 260, W = 380, y = 10, gap = 34;
-            Controls.Add(new Label { Left = L, Top = y, Text = "key", Width = 80 });
-            txtKey = new TextBox { Left = L + 80, Top = y, Width = W - 80 }; y += gap; Controls.Add(txtKey);
+            // ── Left: List + Direct "+ 新建属性" / "删除" toolbar ──
+            var leftCard = new Panel { Dock = DockStyle.Fill, BackColor = StudioTheme.Background, Padding = new Padding(1) };
+            leftCard.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawRectangle(p, 0, 0, leftCard.Width - 1, leftCard.Height - 1); };
 
-            Controls.Add(new Label { Left = L, Top = y, Text = "标题(title)", Width = 90 });
-            txtTitle = new TextBox { Left = L + 100, Top = y, Width = W - 100 }; y += gap; Controls.Add(txtTitle);
+            var leftInner = new Panel { Dock = DockStyle.Fill, BackColor = StudioTheme.Background };
+            var leftBar = new Panel { Dock = DockStyle.Top, Height = 38, BackColor = StudioTheme.Background, Padding = new Padding(8, 4, 6, 4) };
+            leftBar.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawLine(p, 0, leftBar.Height - 1, leftBar.Width, leftBar.Height - 1); };
 
-            Controls.Add(new Label { Left = L, Top = y, Text = "enum 值(逗号)", Width = 110 });
-            txtEnum = new TextBox { Left = L + 120, Top = y, Width = W - 120 }; y += gap; Controls.Add(txtEnum);
+            var btnNew = StudioTheme.Button("新建属性", (_, _) => AddNewProperty(), icon: StudioIcon.TableAdd, borderless: true);
+            btnNew.Dock = DockStyle.Left;
+            btnDelete = StudioTheme.IconButton(StudioIcon.Trash, "删除选中属性", (_, _) => DeleteSelected());
+            btnDelete.Dock = DockStyle.Right;
+            leftBar.Controls.Add(btnNew);
+            leftBar.Controls.Add(btnDelete);
 
-            Controls.Add(new Label { Left = L, Top = y, Text = "默认值", Width = 80 });
-            txtDefault = new TextBox { Left = L + 80, Top = y, Width = W - 80 }; y += gap; Controls.Add(txtDefault);
-
-            btnAdd = new Button { Left = L, Top = y + 10, Text = "新增/清空", Width = 100 };
-            btnDel = new Button { Left = L + 110, Top = y + 10, Text = "删除", Width = 80 };
-            btnSave = new Button { Left = L + 200, Top = y + 10, Text = "保存条目", Width = 90 };
-            btnAdd.Click += (_, __) => { txtKey.Text = txtTitle.Text = txtEnum.Text = txtDefault.Text = ""; list.ClearSelected(); };
-            btnDel.Click += (_, __) =>
+            list = new ListBox
             {
-                if (list.SelectedItem is PropertyDef d)
-                {
-                    working.Properties.RemoveAll(p => p.Key.Equals(d.Key, StringComparison.OrdinalIgnoreCase));
-                    RefreshList();
-                }
+                Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.None,
+                IntegralHeight = false,
+                DrawMode = DrawMode.OwnerDrawFixed,
+                ItemHeight = 46,
+                BackColor = StudioTheme.Background,
+                ForeColor = StudioTheme.Text
             };
-            btnSave.Click += (_, __) => SaveCurrent();
-            Controls.AddRange(new Control[] { btnAdd, btnDel, btnSave });
+            list.DrawItem += DrawListItem;
+            list.SelectedIndexChanged += (_, _) => LoadSelected();
 
-            btnOk = new Button { Text = "确定", Left = Width - 200, Top = Height - 90, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
-            btnCancel = new Button { Text = "取消", Left = Width - 110, Top = Height - 90, Width = 80, Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
-            btnOk.Click += (_, __) => { DialogResult = DialogResult.OK; Close(); };
-            btnCancel.Click += (_, __) => { DialogResult = DialogResult.Cancel; Close(); };
-            Controls.Add(btnOk); Controls.Add(btnCancel);
+            leftInner.Controls.Add(list);
+            leftInner.Controls.Add(leftBar);
+            leftCard.Controls.Add(leftInner);
+            body.Controls.Add(leftCard, 0, 0);
 
-            RefreshList();
+            // ── Right: Live detail editor (auto-syncs to selected item) ──
+            var rightCard = new Panel { Dock = DockStyle.Fill, BackColor = StudioTheme.Surface, Padding = new Padding(20, 14, 20, 14), Margin = new Padding(12, 0, 0, 0) };
+            rightCard.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawRectangle(p, 0, 0, rightCard.Width - 1, rightCard.Height - 1); };
+
+            editorGrid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
+            editorGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            editorGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+            Label AddRow(string label, Control input)
+            {
+                int r = editorGrid.RowCount++;
+                editorGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                var lbl = new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = StudioTheme.Muted, Margin = new Padding(0, 9, 14, 9) };
+                input.Dock = DockStyle.Fill;
+                input.Margin = new Padding(0, 5, 0, 5);
+                editorGrid.Controls.Add(lbl, 0, r);
+                editorGrid.Controls.Add(input, 1, r);
+                return lbl;
+            }
+
+            txtKey = new TextBox { BorderStyle = BorderStyle.FixedSingle };
+            txtTitle = new TextBox { BorderStyle = BorderStyle.FixedSingle };
+            cmbKind = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbKind.Items.AddRange(new[] { "enum", "bool", "int", "string" });
+            cmbScope = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbScope.Items.AddRange(new[] { "column", "table", "both" });
+            txtEnum = new TextBox { BorderStyle = BorderStyle.FixedSingle, PlaceholderText = "例如：ALL, C, S" };
+            txtDefault = new TextBox { BorderStyle = BorderStyle.FixedSingle };
+
+            AddRow("属性键 (key)", txtKey);
+            AddRow("显示标题", txtTitle);
+            AddRow("属性类型", cmbKind);
+            AddRow("适用范围", cmbScope);
+            lblEnum = AddRow("枚举值", txtEnum);
+            AddRow("默认值", txtDefault);
+
+            lblEnumHint = new Label
+            {
+                Text = "提示：修改左侧选中项会实时生效；scope 选 table 或 both 才会出现在「表属性」中。",
+                AutoSize = true,
+                MaximumSize = new Size(420, 0),
+                ForeColor = StudioTheme.SubtleText,
+                Font = StudioTheme.UiFont(8.25F),
+                Margin = new Padding(0, 14, 0, 0)
+            };
+            int hintRow = editorGrid.RowCount++;
+            editorGrid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            editorGrid.Controls.Add(lblEnumHint, 0, hintRow);
+            editorGrid.SetColumnSpan(lblEnumHint, 2);
+
+            txtKey.TextChanged += (_, _) => SyncCurrentFromInputs();
+            txtTitle.TextChanged += (_, _) => SyncCurrentFromInputs();
+            cmbKind.SelectedIndexChanged += (_, _) => { UpdateEnumVisibility(); SyncCurrentFromInputs(); };
+            cmbScope.SelectedIndexChanged += (_, _) => SyncCurrentFromInputs();
+            txtEnum.TextChanged += (_, _) => SyncCurrentFromInputs();
+            txtDefault.TextChanged += (_, _) => SyncCurrentFromInputs();
+
+            lblEmpty = new Label
+            {
+                Text = "暂无自定义属性，点击左侧「新建属性」开始添加。",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = StudioTheme.Muted,
+                Visible = false
+            };
+
+            rightCard.Controls.Add(editorGrid);
+            rightCard.Controls.Add(lblEmpty);
+            body.Controls.Add(rightCard, 1, 0);
+
+            // ── Footer ──
+            var footer = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(14, 10, 14, 12), BackColor = StudioTheme.Background };
+            footer.Paint += (_, e) => { using var p = new Pen(StudioTheme.Border); e.Graphics.DrawLine(p, 0, 0, footer.Width, 0); };
+            var btnOk = StudioTheme.Button("保存属性库", (_, _) => ConfirmAndClose(), primary: true, icon: StudioIcon.Save);
+            var btnCancel = StudioTheme.Button("取消", (_, _) => { DialogResult = DialogResult.Cancel; Close(); });
+            footer.Controls.Add(btnOk);
+            footer.Controls.Add(btnCancel);
+
+            Controls.Add(body);
+            Controls.Add(footer);
+            AcceptButton = btnOk;
+            CancelButton = btnCancel;
+
+            RefreshList(working.Properties.FirstOrDefault());
         }
 
-        private void RefreshList()
+        private void DrawListItem(object? sender, DrawItemEventArgs e)
         {
-            list.Items.Clear();
-            foreach (var p in working.Properties) list.Items.Add(p);
-            list.DisplayMember = nameof(PropertyDef.Display);
-            if (list.Items.Count > 0 && list.SelectedIndex < 0) list.SelectedIndex = 0;
+            if (e.Index < 0 || e.Index >= list.Items.Count) return;
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var bg = new SolidBrush(StudioTheme.Background)) g.FillRectangle(bg, e.Bounds);
+
+            bool selected = (e.State & DrawItemState.Selected) != 0;
+            if (selected)
+            {
+                var pill = new Rectangle(e.Bounds.X + 6, e.Bounds.Y + 3, e.Bounds.Width - 12, e.Bounds.Height - 6);
+                using var path = StudioTheme.RoundedRect(pill, 6);
+                using var fill = new SolidBrush(StudioTheme.ActiveTab);
+                g.FillPath(fill, path);
+            }
+
+            if (list.Items[e.Index] is not PropertyDef d) return;
+            string primary = string.IsNullOrWhiteSpace(d.Title) ? (string.IsNullOrWhiteSpace(d.Key) ? "(未命名属性)" : d.Key) : d.Title;
+            string scopeLabel = d.Scope switch { "table" => "仅表", "both" => "表/列", _ => "仅列" };
+            string secondary = $"{(string.IsNullOrWhiteSpace(d.Key) ? "未填 key" : d.Key)}  ·  {d.Kind}  ·  {scopeLabel}";
+
+            TextRenderer.DrawText(g, primary, StudioTheme.UiFont(9F, selected ? FontStyle.Bold : FontStyle.Regular),
+                new Rectangle(e.Bounds.X + 14, e.Bounds.Y + 6, e.Bounds.Width - 28, 18),
+                StudioTheme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            TextRenderer.DrawText(g, secondary, StudioTheme.UiFont(8F),
+                new Rectangle(e.Bounds.X + 14, e.Bounds.Y + 24, e.Bounds.Width - 28, 16),
+                StudioTheme.Muted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+
+        private void AddNewProperty()
+        {
+            int n = 1;
+            string key;
+            do { key = $"prop_{n++}"; }
+            while (working.Properties.Any(p => p.Key.Equals(key, StringComparison.OrdinalIgnoreCase)));
+
+            var item = new PropertyDef
+            {
+                Key = key,
+                Title = "新属性",
+                Kind = "string",
+                Scope = "both",
+                EnumValues = new List<string>(),
+                Default = ""
+            };
+            working.Properties.Add(item);
+            RefreshList(item);
+            txtKey.Focus();
+            txtKey.SelectAll();
+        }
+
+        private void DeleteSelected()
+        {
+            if (list.SelectedItem is not PropertyDef d) return;
+            int idx = working.Properties.IndexOf(d);
+            working.Properties.Remove(d);
+            PropertyDef? next = working.Properties.Count == 0 ? null : working.Properties[Math.Min(idx, working.Properties.Count - 1)];
+            RefreshList(next);
+        }
+
+        private void RefreshList(PropertyDef? select)
+        {
+            loading = true;
+            try
+            {
+                list.BeginUpdate();
+                list.Items.Clear();
+                foreach (var p in working.Properties) list.Items.Add(p);
+                list.EndUpdate();
+                if (select != null && list.Items.Contains(select)) list.SelectedItem = select;
+                else if (list.Items.Count > 0) list.SelectedIndex = 0;
+            }
+            finally { loading = false; }
+            LoadSelected();
         }
 
         private void LoadSelected()
         {
-            if (list.SelectedItem is PropertyDef d)
+            loading = true;
+            try
             {
-                txtKey.Text = d.Key; txtTitle.Text = d.Title;
-                txtEnum.Text = string.Join(',', d.EnumValues ?? new List<string>());
+                if (list.SelectedItem is not PropertyDef d)
+                {
+                    editorGrid.Visible = false;
+                    lblEmpty.Visible = true;
+                    btnDelete.Enabled = false;
+                    return;
+                }
+                editorGrid.Visible = true;
+                lblEmpty.Visible = false;
+                btnDelete.Enabled = true;
+
+                txtKey.Text = d.Key;
+                txtTitle.Text = d.Title;
+                cmbKind.SelectedItem = cmbKind.Items.Contains(d.Kind) ? d.Kind : "string";
+                cmbScope.SelectedItem = cmbScope.Items.Contains(d.Scope) ? d.Scope : "column";
+                txtEnum.Text = string.Join(", ", d.EnumValues ?? new List<string>());
                 txtDefault.Text = d.Default ?? "";
+                UpdateEnumVisibility();
             }
+            finally { loading = false; }
         }
 
-        private void SaveCurrent()
+        private void UpdateEnumVisibility()
         {
-            var key = txtKey.Text.Trim();
-            if (string.IsNullOrEmpty(key)) { MessageBox.Show("key 不能为空"); return; }
+            bool isEnum = string.Equals(cmbKind.SelectedItem?.ToString(), "enum", StringComparison.OrdinalIgnoreCase);
+            lblEnum.Visible = isEnum;
+            txtEnum.Visible = isEnum;
+        }
 
-            var def = working.Properties.FirstOrDefault(p => p.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
-            if (def == null)
+        private void SyncCurrentFromInputs()
+        {
+            if (loading || list.SelectedItem is not PropertyDef d) return;
+            d.Key = txtKey.Text.Trim();
+            d.Title = txtTitle.Text.Trim();
+            d.Kind = cmbKind.SelectedItem?.ToString() ?? "string";
+            d.Scope = cmbScope.SelectedItem?.ToString() ?? "column";
+            d.EnumValues = d.Kind == "enum"
+                ? txtEnum.Text.Split(new[] { ',', '，' }, StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()).Distinct().ToList()
+                : new List<string>();
+            d.Default = txtDefault.Text.Trim();
+            list.Invalidate();
+        }
+
+        private void ConfirmAndClose()
+        {
+            SyncCurrentFromInputs();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in working.Properties)
             {
-                def = new PropertyDef { Key = key, Scope = "column", Kind = "enum" };
-                working.Properties.Add(def);
+                if (string.IsNullOrWhiteSpace(p.Key))
+                {
+                    list.SelectedItem = p;
+                    MessageBox.Show(this, "存在属性键 (key) 为空的条目，请填写或删除后再保存。", "属性库校验", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    txtKey.Focus();
+                    return;
+                }
+                if (!seen.Add(p.Key))
+                {
+                    list.SelectedItem = p;
+                    MessageBox.Show(this, $"属性键 \"{p.Key}\" 重复，请修改为唯一的 key。", "属性库校验", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    txtKey.Focus();
+                    return;
+                }
+                if (p.Kind == "enum" && (p.EnumValues == null || p.EnumValues.Count == 0))
+                {
+                    list.SelectedItem = p;
+                    MessageBox.Show(this, $"枚举属性 \"{p.Key}\" 请至少填写一个枚举值（逗号分隔）。", "属性库校验", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    txtEnum.Focus();
+                    return;
+                }
             }
-
-            def.Title = txtTitle.Text.Trim();
-            def.Scope = "column";
-            def.Kind  = string.IsNullOrEmpty(def.Kind) ? "enum" : def.Kind;
-            def.EnumValues = txtEnum.Text
-                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(s => s.Trim())
-                .Distinct()
-                .ToList();
-            def.Default = txtDefault.Text.Trim();
-
-            RefreshList();
+            DialogResult = DialogResult.OK;
+            Close();
         }
     }
 }

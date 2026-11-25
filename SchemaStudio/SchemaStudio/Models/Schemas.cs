@@ -65,23 +65,29 @@ namespace SchemaStudio.Models
     // —— JSON Schema —— //
     public class TableSchema
     {
+        [JsonExtensionData] public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }
         [JsonPropertyName("table_name")]       public string? TableName { get; set; }
         [JsonPropertyName("columns")]          public List<ColumnSchema>? Columns { get; set; }
         [JsonPropertyName("table_properties")] public List<PropertyKV>? TableProperties { get; set; } = new();
     }
     public class WorkbookSchema
     {
+        [JsonExtensionData] public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }
         [JsonPropertyName("workbook_name")] public string? WorkbookName { get; set; }
         [JsonPropertyName("sheets")]        public List<SheetSchema> Sheets { get; set; } = new();
     }
     public class SheetSchema
     {
+        [JsonExtensionData] public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }
         [JsonPropertyName("sheet_name")]       public string SheetName { get; set; } = "";
         [JsonPropertyName("columns")]          public List<ColumnSchema> Columns { get; set; } = new();
         [JsonPropertyName("sheet_properties")] public List<PropertyKV>? SheetProperties { get; set; } = new();
     }
     public class ColumnSchema
     {
+        [JsonIgnore] public bool IsConfigured { get; set; }
+        [JsonIgnore] public bool HasStoredDefinition { get; set; }
+        [JsonExtensionData] public Dictionary<string, System.Text.Json.JsonElement>? Extra { get; set; }
         [JsonPropertyName("col_name")]       public string? ColName { get; set; }
         [JsonPropertyName("value_type")]     public string? ValueType { get; set; }
         [JsonPropertyName("pk_order")]       public int PkOrder { get; set; } = -1;
